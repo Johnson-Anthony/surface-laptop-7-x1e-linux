@@ -14,7 +14,8 @@ binary files, blocked file types and files over 1 MB.
 
 If ~/.config/sl7-scrub/denylist exists (one literal per line, # for comments),
 any of those strings is an error too. Keep that file OUT of the repo: it holds
-the real values.
+the real values. In .patch/.diff files, upstream context and removed lines
+are skipped by the generic rules (the denylist still applies).
 
 A line is exempt if it contains the marker  scrub:allow  (use sparingly, with a
 reason next to it). Paths listed in tools/dev/scrub-allow-paths are exempt from
@@ -89,9 +90,21 @@ def scan_blob(name, data, deny, allowed, problems):
             problems.append(f"{name}: contains a denylisted value ({mask(d)})")
     if name in allowed:
         return
+    is_patch = ext in (".patch", ".diff")
+    in_hunk = False
     for n, line in enumerate(text.splitlines(), 1):
         if "scrub:allow" in line:
             continue
+        # In a patch, context and removed lines are upstream code (author
+        # emails in MODULE_AUTHOR, for example). Only the header, the
+        # message and added lines are ours. The denylist above still
+        # covers the whole file.
+        if is_patch:
+            if line.startswith("diff --git") or line.startswith("@@"):
+                in_hunk = True
+                continue
+            if in_hunk and line[:1] in (" ", "-", "\\") and not line.startswith("-- "):
+                continue
         for rule, rx in RULES:
             for m in rx.finditer(line):
                 hit = m.group(0)

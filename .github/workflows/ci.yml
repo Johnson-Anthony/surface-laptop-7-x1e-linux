@@ -34,7 +34,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cp"
           for f in checkpatch.pl spelling.txt const_structs.checkpatch; do
             curl -fsSLo "$RUNNER_TEMP/cp/$f" \
-              "https://raw.githubusercontent.com/torvalds/linux/v6.18/scripts/$f"
+              "https://raw.githubusercontent.com/torvalds/linux/v7.3/scripts/$f"
           done
           # Signed-off-by is added by the human submitter, not stored here
           # (see patches/kernel-7.3/README.md).

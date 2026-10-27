@@ -8,8 +8,8 @@ Module.symvers
 modules.order
 *.dtb
 *.dtbo
-out/
-build/
+/out/
+/build/
 __pycache__/
 *.pyc
 # Keys, firmware, images and packages
