@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+"""Enable Surface Aggregator POS (posture) events on the Surface Laptop 7.
+
+The SL7 EC keeps the touchpad off until a host has enabled POS events and
+taken the pending posture change (lid closed -> laptop).  Windows'
+SurfaceHotPlug does this at every boot.  Mainline Linux does not, because the
+SL7 node group in surface_aggregator_registry has no POS node.  This sends the
+same request through the stock surface_aggregator_cdev module (no kernel
+rebuild): SAM registry (TC 0x01, CID 0x0b) with payload 26 01 26 00 00.
+
+Kernels with ItsLucas patch 0020 have the POS node, and their
+surface_aggregator_tabletsw driver sends this request itself.  There,
+`enable` does nothing and `disable` refuses (it would take the kernel
+driver's reference away), unless --force is given.
+
+Diagnosis: ItsLucas/surface-laptop-7-ubuntu-kernel commit 004e91d
+("Enable SAM POS events on the Surface Laptop 7").
+
+  status   read-only: the kernel's POS node, posture sources and postures
+  enable   register for POS events, enable them, print events for --wait s
+  disable  send the matching disable request (CID 0x0c)
+  watch    print POS events until interrupted (events must be enabled)
+
+Run as root.  The service file sl7-pos-events.service runs `enable` at boot.
+"""
+
+import argparse
+import ctypes
+import errno
+import fcntl
+import glob
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+DEV = "/dev/surface/aggregator"
+
+# The kernel's POS tablet-switch device: SAM domain 01, TC 0x26, TID 01,
+# IID 00, function 01 (software node "ssam:01:26:01:00:01").
+POS_NODE = "/sys/bus/surface_aggregator/devices/01:26:01:00:01"
+# surface_aggregator_registry's hub.  Its probe adds every SAM client device,
+# so once it is bound, a missing POS node means the kernel has none.
+REGISTRY_HUB = "/sys/bus/platform/devices/surface_aggregator_platform_hub*"
+
+TC_SAM, TID_SAM, TC_POS = 0x01, 0x01, 0x26
+CID_EVENT_ENABLE, CID_EVENT_DISABLE = 0x0B, 0x0C
+EVENT_SEQUENCED = 0x01
+REQUEST_HAS_RESPONSE = 0x01
+
+POSTURE_NAMES = {0x02: "lid closed", 0x03: "laptop"}
+
+
+def _iowr(nr, size, rw):
+    # asm-generic ioctl encoding: dir(2) size(14) type(8) nr(8)
+    return (rw << 30) | (size << 16) | (0xA5 << 8) | nr
+
+
+REQ_FMT = "<BBBBHh QH6x QH6x"           # struct ssam_cdev_request (40 bytes)
+NOTIF_FMT = "<iB"                        # struct ssam_cdev_notifier_desc
+EVENT_FMT = "<BBBBBBB"                   # struct ssam_cdev_event_desc
+SSAM_CDEV_REQUEST = _iowr(1, struct.calcsize(REQ_FMT), 3)
+SSAM_CDEV_NOTIF_REGISTER = _iowr(2, struct.calcsize(NOTIF_FMT), 1)
+SSAM_CDEV_EVENT_ENABLE = _iowr(4, struct.calcsize(EVENT_FMT), 1)
+SSAM_CDEV_EVENT_DISABLE = _iowr(5, struct.calcsize(EVENT_FMT), 1)
+
+
+def kernel_pos_driver(wait=0.0):
+    """Return the driver bound to the kernel's POS node, or None.
+
+    With wait > 0, give the registry up to that many seconds to add its
+    devices and the driver to bind, but return None at once when the
+    registry is done and has no POS node (a kernel without 0020).
+    """
+    deadline = time.monotonic() + wait
+    while True:
+        link = os.path.join(POS_NODE, "driver")
+        if os.path.exists(link):
+            return os.path.basename(os.readlink(link))
+        hub_bound = any(os.path.exists(os.path.join(h, "driver"))
+                        for h in glob.glob(REGISTRY_HUB))
+        if time.monotonic() >= deadline or (hub_bound and not os.path.exists(POS_NODE)):
+            return None
+        time.sleep(0.2)
+
+
+def open_cdev(timeout):
+    if not os.path.exists(DEV):
+        subprocess.run(["modprobe", "surface_aggregator_cdev"], check=False)
+        # The node appears only once the SAM controller has probed.
+        deadline = time.monotonic() + timeout
+        while not os.path.exists(DEV) and time.monotonic() < deadline:
+            time.sleep(0.1)
+    return os.open(DEV, os.O_RDWR | os.O_NONBLOCK)
+
+
+def request(fd, tc, cid, payload=b"", iid=0x00, rsp_cap=64):
+    pbuf = ctypes.create_string_buffer(payload, max(len(payload), 1))
+    rbuf = ctypes.create_string_buffer(rsp_cap)
+    req = bytearray(struct.pack(REQ_FMT, tc, TID_SAM, cid, iid,
+                                REQUEST_HAS_RESPONSE, 0,
+                                ctypes.addressof(pbuf), len(payload),
+                                ctypes.addressof(rbuf), rsp_cap))
+    fcntl.ioctl(fd, SSAM_CDEV_REQUEST, req)
+    fields = struct.unpack(REQ_FMT, req)
+    status, rsp_len = fields[5], fields[9]
+    if status:
+        raise OSError(-status, f"SAM request tc={tc:#04x} cid={cid:#04x} failed: "
+                               f"{os.strerror(-status)}")
+    return rbuf.raw[:rsp_len]
+
+
+def pos_event_desc():
+    return struct.pack(EVENT_FMT, TC_SAM, TID_SAM, CID_EVENT_ENABLE,
+                       CID_EVENT_DISABLE, TC_POS, 0x00, EVENT_SEQUENCED)
+
+
+def print_events(fd, seconds):
+    deadline = None if seconds is None else time.monotonic() + seconds
+    buf = b""
+    while True:
+        timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        r, _, _ = select.select([fd], [], [], timeout)
+        if not r:
+            return
+        try:
+            buf += os.read(fd, 4096)
+        except BlockingIOError:
+            continue
+        while len(buf) >= 6:
+            tc, _tid, cid, iid, length = struct.unpack_from("<BBBBH", buf)
+            if len(buf) < 6 + length:
+                break
+            data = buf[6:6 + length]
+            buf = buf[6 + length:]
+            words = [struct.unpack_from("<I", data, i)[0] for i in range(0, len(data) - 3, 4)]
+            note = ""
+            if tc == TC_POS and len(words) == 3:
+                # Layout is undocumented (the kernel re-queries instead of
+                # parsing it); seen so far: source id, then two posture values.
+                note = (f"  source {words[0]}, posture values "
+                        f"{words[1]}/{words[2]} ({POSTURE_NAMES.get(words[2], '?')})")
+            print(f"{time.strftime('%H:%M:%S')} event tc={tc:#04x} cid={cid:#04x} "
+                  f"iid={iid:#04x} data={data.hex(' ')}{note}", flush=True)
+
+
+def describe_kernel_node():
+    drv = kernel_pos_driver()
+    if drv:
+        try:
+            with open(os.path.join(POS_NODE, "state")) as f:
+                state = f.read().strip()
+        except OSError:
+            state = "?"
+        return f"kernel POS node: bound to {drv} (state {state}); it enables POS events itself"
+    if os.path.exists(POS_NODE):
+        return "kernel POS node: present but no driver bound (surface_aggregator_tabletsw not loaded?)"
+    return "kernel POS node: none (kernel without ItsLucas 0020); use 'enable' at boot"
+
+
+def cmd_status(fd, _args):
+    rsp = request(fd, TC_POS, 0x01)
+    count = struct.unpack_from("<I", rsp)[0] if len(rsp) >= 4 else 0
+    ids = [struct.unpack_from("<I", rsp, 4 + 4 * i)[0] for i in range(count)]
+    print(f"posture sources: {ids or 'none'}")
+    for sid in ids:
+        state = struct.unpack("<I", request(fd, TC_POS, 0x02, struct.pack("<I", sid))[:4])[0]
+        print(f"  source {sid}: posture {state} ({POSTURE_NAMES.get(state, 'unknown')})")
+
+
+def cmd_enable(fd, args):
+    fcntl.ioctl(fd, SSAM_CDEV_NOTIF_REGISTER, struct.pack(NOTIF_FMT, 1, TC_POS))
+    # The controller reference-counts enables and the cdev does not undo
+    # them on close, so the events stay enabled after this process exits.
+    fcntl.ioctl(fd, SSAM_CDEV_EVENT_ENABLE, pos_event_desc())
+    print("POS events enabled (SAM tc=0x01 cid=0x0b payload 26 01 26 00 00)", flush=True)
+    print_events(fd, args.wait)
+
+
+def cmd_disable(fd, _args):
+    fcntl.ioctl(fd, SSAM_CDEV_EVENT_DISABLE, pos_event_desc())
+    print("POS events disabled (one reference dropped; the EC sees it at zero)")
+
+
+def cmd_watch(fd, _args):
+    fcntl.ioctl(fd, SSAM_CDEV_NOTIF_REGISTER, struct.pack(NOTIF_FMT, 1, TC_POS))
+    print_events(fd, None)
+
+
+def leave_to_kernel(command, drv):
+    """Report that the kernel's POS driver owns the enable; return the exit code."""
+    if command == "enable":
+        print(f"{drv} is bound to {os.path.basename(POS_NODE)} and enabled POS "
+              "events itself (ItsLucas 0020); nothing to do")
+        return 0
+    print(f"refusing: {drv} owns the POS event enable; disabling it here would "
+          "leave the kernel driver without events (--force does it anyway)",
+          file=sys.stderr)
+    return 1
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        epilog="See docs/touchpad.md in surface-laptop-7-x1e-linux.")
+    ap.add_argument("command", choices=["status", "enable", "disable", "watch"])
+    ap.add_argument("--wait", type=float, default=2.0,
+                    help="seconds to print events after enabling (default 2)")
+    ap.add_argument("--timeout", type=float, default=30.0,
+                    help=f"seconds to wait for {DEV} to appear (default 30)")
+    ap.add_argument("--force", action="store_true",
+                    help="enable/disable through the cdev even if the kernel's "
+                         "POS driver is bound (testing only)")
+    args = ap.parse_args()
+
+    check_kernel = args.command in ("enable", "disable") and not args.force
+    if args.command == "status":
+        print(describe_kernel_node(), flush=True)
+    if check_kernel:
+        # A kernel with 0020 never needs the cdev.
+        drv = kernel_pos_driver()
+        if drv:
+            sys.exit(leave_to_kernel(args.command, drv))
+    try:
+        fd = open_cdev(args.timeout)
+    except OSError as e:
+        sys.exit(f"cannot open {DEV}: {e}")
+    try:
+        if check_kernel and args.command == "enable":
+            # At boot the registry may still be adding its devices.
+            drv = kernel_pos_driver(wait=10)
+            if drv:
+                sys.exit(leave_to_kernel(args.command, drv))
+        {"status": cmd_status, "enable": cmd_enable,
+         "disable": cmd_disable, "watch": cmd_watch}[args.command](fd, args)
+    except OSError as e:
+        if e.errno == errno.ENOTTY:
+            sys.exit("ioctl not supported by this surface_aggregator_cdev")
+        sys.exit(str(e))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    main()

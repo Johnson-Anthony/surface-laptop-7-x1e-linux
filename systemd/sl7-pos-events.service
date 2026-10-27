@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Enables SAM posture (POS) events once per boot, so the Surface Laptop 7 EC
+# releases the touchpad. Needed only on kernels without ItsLucas patch 0020;
+# on kernels with it, sl7-pos-events sees the kernel's POS driver and exits.
+#
+# The SAM cdev appears only after the SAM controller has probed. The script
+# loads surface_aggregator_cdev and waits up to 30 s for the node; if that
+# still fails, systemd retries every 5 s, at most 4 more times.
+[Unit]
+Description=Enable Surface Laptop 7 SAM posture events (EC touchpad gate)
+Documentation=https://github.com/Johnson-Anthony/surface-laptop-7-x1e-linux/blob/main/docs/touchpad.md
+After=systemd-modules-load.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/sl7-pos-events enable --wait 3 --timeout 30
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

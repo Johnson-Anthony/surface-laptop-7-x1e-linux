@@ -1,0 +1,91 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Log the SL7 touchpad's state for the first 90 s of a boot, so a boot where
+# the touchpad is dead (usually power-cycled within a minute) leaves evidence:
+#   irq        interrupts on the touchpad IRQ (msmgpio 3 on the SL7); flat while
+#              you touch the pad = the device is not streaming (EC gate, power)
+#   ready, bus_err, dev_reset   spi_hid sysfs state and counters
+#   iptsd      state of the iptsd instance on the touchpad's hidraw node
+# Only changed lines are logged. They go to the journal
+# (journalctl -b -t sl7-touchpad) and are synced at once, because a forced
+# power-off would otherwise lose them.
+#
+# The touchpad is found by its HID ID; SL7_TOUCHPAD_SPI=spiX.Y overrides that.
+# Started by sl7-touchpad-diag.service; see docs/touchpad.md.
+
+set -u
+TOUCHPAD_HID=045E:0C77
+
+# The SPI device of the touchpad: the one with the touchpad's HID child, else
+# the one whose DT node is named "touchpad", else spi0.0.
+touchpad_spi() {
+	if [ -n "${SL7_TOUCHPAD_SPI:-}" ]; then
+		echo "$SL7_TOUCHPAD_SPI"
+		return
+	fi
+	for d in /sys/bus/spi/devices/*; do
+		for h in "$d"/*:"$TOUCHPAD_HID".*; do
+			[ -e "$h" ] && { echo "${d##*/}"; return; }
+		done
+	done
+	for d in /sys/bus/spi/devices/*; do
+		[ "$(tr -d '\0' < "$d/of_node/name" 2>/dev/null)" = touchpad ] &&
+			{ echo "${d##*/}"; return; }
+	done
+	echo spi0.0
+}
+
+# hidraw node of the touchpad's HID device (empty if not enumerated).
+touchpad_hidraw() {
+	for h in /sys/bus/spi/devices/"$1"/*:"$TOUCHPAD_HID".*/hidraw/hidraw*; do
+		[ -e "$h" ] && { echo "${h##*/}"; return; }
+	done
+}
+
+# Total interrupts of the IRQ whose action is $1. Sums only the per-CPU
+# columns (one per CPUn field in the header): the columns after them are the
+# chip name and the hwirq number, which must not be added.
+irq_count() {
+	awk -v dev="$1" '
+		NR == 1 { ncpu = NF; next }
+		$NF == dev { s = 0; for (i = 2; i <= ncpu + 1; i++) s += $i; print s; exit }
+	' /proc/interrupts
+}
+
+# The loaded iptsd instance whose name ends in hidraw node $1 (upstream names
+# it after the escaped device path, dev-hidrawN).
+iptsd_unit() {
+	[ -n "$1" ] || return 0
+	systemctl list-units --all --plain --no-legend 'iptsd@*.service' 2>/dev/null |
+		awk -v h="$1" '$1 ~ ("[@-]" h "\\.service$") { print $1; exit }'
+}
+
+dev=$(touchpad_spi)
+sys=/sys/bus/spi/devices/$dev
+logger -t sl7-touchpad "touchpad $dev;" \
+	"spi_hid version=$(cat /sys/module/spi_hid/version 2>/dev/null || echo stock)" \
+	"srcversion=$(cat /sys/module/spi_hid/srcversion 2>/dev/null)"
+last=""
+i=0
+while [ $i -lt 18 ]; do
+	irq=$(irq_count "$dev")
+	ready=$(cat "$sys/ready" 2>/dev/null)
+	err=$(cat "$sys/bus_error_count" 2>/dev/null)
+	dir=$(cat "$sys/device_initiated_reset_count" 2>/dev/null)
+	unit=$(iptsd_unit "$(touchpad_hidraw "$dev")")
+	if [ -n "$unit" ]; then
+		iptsd=$(systemctl is-active "$unit" 2>/dev/null)
+	else
+		iptsd=none
+	fi
+	line="irq=${irq:-none} ready=${ready:-?} bus_err=${err:-?} dev_reset=${dir:-?} iptsd=$iptsd"
+	if [ "$line" != "$last" ]; then
+		logger -t sl7-touchpad "t+$((i * 5))s $line"
+		journalctl --sync 2>/dev/null
+		last=$line
+	fi
+	i=$((i + 1))
+	sleep 5
+done

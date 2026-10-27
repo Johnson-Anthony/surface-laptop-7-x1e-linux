@@ -1,0 +1,169 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Try to bring a dead SL7 touchpad back without a reboot. Run as root from
+# a terminal (the keyboard works when the touchpad doesn't):
+#   sudo sl7-touchpad-kick                    all steps, stopping once the cursor works
+#   sudo sl7-touchpad-kick pos|iptsd|rebind   one step
+# After each step it counts touchpad IRQs while you move a finger, then asks
+# whether the cursor moves. Everything is logged (journalctl -t sl7-touchpad),
+# including which step fixed it. See docs/touchpad.md.
+#
+# Needs sl7-pos-events next to this script or in PATH (only for the pos step
+# on kernels without ItsLucas patch 0020).
+
+set -u
+TOUCHPAD_HID=045E:0C77
+POS_NODE=/sys/bus/surface_aggregator/devices/01:26:01:00:01
+here=$(dirname "$(readlink -f "$0")")
+
+# The helpers below are the same as in sl7-touchpad-diag.
+touchpad_spi() {
+	if [ -n "${SL7_TOUCHPAD_SPI:-}" ]; then
+		echo "$SL7_TOUCHPAD_SPI"
+		return
+	fi
+	for d in /sys/bus/spi/devices/*; do
+		for h in "$d"/*:"$TOUCHPAD_HID".*; do
+			[ -e "$h" ] && { echo "${d##*/}"; return; }
+		done
+	done
+	for d in /sys/bus/spi/devices/*; do
+		[ "$(tr -d '\0' < "$d/of_node/name" 2>/dev/null)" = touchpad ] &&
+			{ echo "${d##*/}"; return; }
+	done
+	echo spi0.0
+}
+
+touchpad_hidraw() {
+	for h in /sys/bus/spi/devices/"$1"/*:"$TOUCHPAD_HID".*/hidraw/hidraw*; do
+		[ -e "$h" ] && { echo "${h##*/}"; return; }
+	done
+}
+
+# Sums only the per-CPU columns, not the chip and hwirq columns after them.
+irq_count() {
+	awk -v dev="$1" '
+		NR == 1 { ncpu = NF; next }
+		$NF == dev { s = 0; for (i = 2; i <= ncpu + 1; i++) s += $i; print s; exit }
+	' /proc/interrupts
+}
+
+iptsd_unit() {
+	[ -n "$1" ] || return 0
+	systemctl list-units --all --plain --no-legend 'iptsd@*.service' 2>/dev/null |
+		awk -v h="$1" '$1 ~ ("[@-]" h "\\.service$") { print $1; exit }'
+}
+
+pos_events() {
+	if [ -x "$here/sl7-pos-events" ]; then
+		python3 -I "$here/sl7-pos-events" "$@"
+	elif p=$(command -v sl7-pos-events); then
+		python3 -I "$p" "$@"
+	else
+		echo "sl7-pos-events not found next to $0 or in PATH" >&2
+		return 127
+	fi
+}
+
+log() {
+	echo "$*"
+	logger -t sl7-touchpad "kick: $*"
+}
+
+# Counts touchpad IRQs over 5 s of touching, then asks whether the cursor
+# moves (IRQs alone can flow while the pad is in the wrong mode).
+probe() {
+	echo "   move a finger on the touchpad now (5 s)..."
+	a=$(irq_count "$dev"); sleep 5; b=$(irq_count "$dev")
+	n=$(( ${b:-0} - ${a:-0} ))
+	printf "   %s touchpad IRQs in 5 s. Does the cursor move now? [y/N] " "$n"
+	read -r ans
+	case "$ans" in
+	[yY]*) log "after $1: $n IRQs, cursor works: FIXED by step $1"; return 0 ;;
+	*) log "after $1: $n IRQs, cursor still dead"; return 1 ;;
+	esac
+}
+
+# 1. EC gate: make the EC see a fresh POS event enable. The controller
+#    reference-counts enables and only the first enable and the last disable
+#    reach the EC, so the old enable has to go first.
+#    - Kernel with ItsLucas 0020: rebind its tablet-mode-switch driver, whose
+#      remove() disables and probe() enables. This reaches the EC only if
+#      nothing else holds a reference (for example sl7-pos-events --force).
+#    - Otherwise: disable and enable again through the cdev.
+step_pos() {
+	if [ -e "$POS_NODE/driver" ]; then
+		drv=$(readlink -f "$POS_NODE/driver")
+		node=${POS_NODE##*/}
+		log "step pos: rebinding ${drv##*/} on $node"
+		echo "$node" > "$drv/unbind"
+		sleep 1
+		if ! echo "$node" > "$drv/bind"; then
+			log "bind failed: POS events are now off; try: modprobe -r surface_aggregator_tabletsw; modprobe surface_aggregator_tabletsw"
+		fi
+		sleep 1
+		log "posture: $(cat "$POS_NODE/state" 2>/dev/null || echo unknown)"
+	else
+		log "step pos: re-sending SAM POS event enable"
+		pos_events disable >/dev/null 2>&1
+		pos_events enable --wait 2 | while read -r l; do log "$l"; done
+	fi
+	probe pos
+}
+
+# 2. A device-initiated reset leaves the pad in its default mode, which the
+#    ELLX spi_hid never reports; restarting iptsd re-applies the mode.
+step_iptsd() {
+	unit=$(iptsd_unit "$(touchpad_hidraw "$dev")")
+	log "step iptsd: restarting ${unit:-all iptsd instances}"
+	systemctl restart "${unit:-iptsd@*.service}"
+	sleep 2
+	probe iptsd
+}
+
+# 3. Full re-probe: power off, power on, re-enumerate.
+#    WARNING: the ELLX (stock 7.0) spi_hid's remove() frees its buffers
+#    without cancelling reset_work, so unbinding it while a reset is queued
+#    can use freed memory (review finding). Its builds have no module
+#    version, so ask first in that case, and unbind with iptsd stopped and
+#    the pad settled, as the old trackpad sleep hook did after every resume.
+#    Drivers with ItsLucas 0002 (the 7.3 kit) cancel the work first.
+step_rebind() {
+	spidrv=/sys/bus/spi/drivers/spi_hid
+	if [ ! -e /sys/module/spi_hid/version ]; then
+		printf "   stock spi_hid: unbinding it can crash if a reset is in flight. Go on? [y/N] "
+		read -r ans
+		case "$ans" in [yY]*) ;; *) log "step rebind: skipped"; return 1 ;; esac
+		unit=$(iptsd_unit "$(touchpad_hidraw "$dev")")
+		[ -n "$unit" ] && systemctl stop "$unit"
+		sleep 3
+	fi
+	log "step rebind: unbinding and rebinding $dev"
+	[ -e "$sys/driver" ] && echo "$dev" > "$spidrv/unbind"
+	sleep 1
+	echo "$dev" > "$spidrv/bind"
+	# Power cycle plus firmware settle take about 3.5 s on the 7.3 driver.
+	t=0
+	while [ $t -lt 15 ] && [ "$(cat "$sys/ready" 2>/dev/null)" != ready ]; do
+		sleep 1
+		t=$((t + 1))
+	done
+	sleep 2
+	log "after rebind: ready=$(cat "$sys/ready" 2>/dev/null) after ${t}s"
+	probe rebind
+}
+
+[ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
+dev=$(touchpad_spi)
+sys=/sys/bus/spi/devices/$dev
+log "start: touchpad $dev irq=$(irq_count "$dev") ready=$(cat "$sys/ready" 2>/dev/null)"
+
+case "${1:-all}" in
+pos) step_pos ;;
+iptsd) step_iptsd ;;
+rebind) step_rebind ;;
+all) step_pos || step_iptsd || step_rebind ;;
+*) echo "usage: $0 [pos|iptsd|rebind]" >&2; exit 2 ;;
+esac

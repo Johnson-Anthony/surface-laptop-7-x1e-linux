@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Logs the touchpad's IRQ count and spi_hid counters every 5 s for the first
+# 90 s of each boot (journalctl -b -t sl7-touchpad). Debug aid; disable it
+# once cold boots are known to be good.
+[Unit]
+Description=Log Surface Laptop 7 touchpad state during the first 90 s of boot
+Documentation=https://github.com/Johnson-Anthony/surface-laptop-7-x1e-linux/blob/main/docs/touchpad.md
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sl7-touchpad-diag
+
+[Install]
+WantedBy=multi-user.target

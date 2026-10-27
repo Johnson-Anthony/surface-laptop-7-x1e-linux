@@ -1,0 +1,94 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Does closing the lid upset the touchscreen? Keeps the laptop awake for 90 s
+# (logind lid-switch and sleep inhibitor), logs lid switch events and spi_hid
+# kernel messages with wall-clock times, then prints them merged, with both
+# touch devices' spi_hid counters before and after.
+#
+#   sudo tools/debug/touch-lid-test [seconds]
+#   then close the lid for about 5 s, reopen it, and wait.
+#
+# Output: ${XDG_STATE_HOME:-$HOME/.local/state}/sl7/lid-<time>/ of the user
+# who ran sudo (kernel, lid, merged, counters).
+#
+# Status: written for the 7.3 touchscreen errors around suspend
+# (docs/touchpad.md); it has not been run yet.
+
+set -u
+secs=${1:-90}
+TOUCHPAD_HID=045E:0C77
+TOUCHSCREEN_HID=045E:0C6E
+
+[ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
+
+# SPI device whose HID child has ID $1, else $2.
+spi_of() {
+	for d in /sys/bus/spi/devices/*; do
+		for h in "$d"/*:"$1".*; do
+			[ -e "$h" ] && { echo "${d##*/}"; return; }
+		done
+	done
+	echo "$2"
+}
+
+# First input device that reports SW_LID (bit 0 of the switch bitmap).
+lid_device() {
+	for c in /sys/class/input/event*/device/capabilities/sw; do
+		sw=$(cat "$c" 2>/dev/null) || continue
+		low=${sw##* }
+		[ -n "$low" ] || continue
+		if [ $((0x$low & 1)) -eq 1 ]; then
+			ev=${c%/device/capabilities/sw}
+			echo "/dev/input/${ev##*/}"
+			return
+		fi
+	done
+}
+
+counters() {
+	for d in "$ts" "$tp"; do
+		s=/sys/bus/spi/devices/$d
+		echo "$1 $d: ready=$(cat "$s/ready" 2>/dev/null)" \
+			"bus_err=$(cat "$s/bus_error_count" 2>/dev/null)" \
+			"resets=$(cat "$s/device_initiated_reset_count" 2>/dev/null)"
+	done
+}
+
+stamp() { while IFS= read -r l; do echo "$(date +%T.%3N) $l"; done; }
+
+# Write into the invoking user's state directory, owned by that user.
+owner=${SUDO_USER:-}
+[ "$owner" = root ] && owner=
+if [ -n "$owner" ]; then
+	home=$(getent passwd "$owner" | cut -d: -f6)
+	out=${XDG_STATE_HOME:-$home/.local/state}/sl7/lid-$(date +%Y%m%d-%H%M%S)
+	runuser -u "$owner" -- mkdir -p "$out" || exit 1
+else
+	out=${XDG_STATE_HOME:-$HOME/.local/state}/sl7/lid-$(date +%Y%m%d-%H%M%S)
+	mkdir -p "$out" || exit 1
+fi
+
+ts=$(spi_of "$TOUCHSCREEN_HID" spi1.0)
+tp=$(spi_of "$TOUCHPAD_HID" spi0.0)
+lid=$(lid_device)
+[ -n "$lid" ] || { echo "no input device reports a lid switch" >&2; exit 1; }
+echo "lid switch: $lid; touchscreen $ts, touchpad $tp"
+echo "close the lid for about 5 s within $secs s, then reopen it"
+counters before | tee "$out/counters"
+
+# Both readers stop by themselves shortly after the inhibitor ends.
+timeout "$((secs + 2))" dmesg -W 2>/dev/null |
+	grep --line-buffered -E 'spi_hid|spi-hid' | stamp > "$out/kernel" &
+timeout "$((secs + 2))" stdbuf -oL libinput debug-events --device "$lid" 2>&1 |
+	grep --line-buffered -i switch | stamp > "$out/lid" &
+systemd-inhibit --what=handle-lid-switch:sleep --mode=block \
+	--who=touch-lid-test --why="touch lid test" sleep "$secs"
+wait
+
+sort "$out/kernel" "$out/lid" > "$out/merged"
+cat "$out/merged"
+counters after | tee -a "$out/counters"
+[ -n "$owner" ] && chown -R "$owner": "$out"
+echo "log: $out"
