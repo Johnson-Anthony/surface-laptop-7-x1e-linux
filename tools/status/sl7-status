@@ -1,0 +1,283 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# One read-only status page for the Surface Laptop 7 work in this repo: IR camera and
+# face unlock, touchpad and touchscreen, deep sleep, and what a kernel update can
+# break. It changes nothing. Run it as root for the debugfs counters, the journal and
+# the Howdy models; as a user it shows what it can.
+#
+# Usage: [sudo] sl7-status [--grub[=DEV|DIR]]
+#   --grub      also show the GRUB default and one-shot entries, and the default
+#               entry's DTB and sleep flags (root). Without a value, the GRUB
+#               partition is found from the EFI system partition's grub.cfg stub;
+#               DEV is a block device or UUID=..., DIR a mounted partition or its
+#               boot/grub directory. An unmounted partition is mounted read-only
+#               for the read and unmounted again.
+kver=$(uname -r)
+root=no; [ "$(id -u)" -eq 0 ] && root=yes
+D=/sys/kernel/debug
+tools=$(cd "$(dirname "$0")/.." && pwd)
+grub=no
+case ${1:-} in
+--grub) grub=auto ;;
+--grub=*) grub=${1#--grub=} ;;
+"") ;;
+*) sed -n '/^# Usage:/,/^kver=/{ /^kver=/d; s/^# \{0,1\}//; p; }' "$0" >&2; exit 2 ;;
+esac
+
+yn() { if eval "$1" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+# Print a partition UUID only as <uuid>, so the output can be shared.
+nouuid() { sed 's/[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}/<uuid>/g'; }
+# Interrupts of one device, summed over the per-CPU columns only. /proc/interrupts
+# has one column per online CPU (the header row), then chip, hwirq, trigger and name.
+irqs() {
+	awk -v dev="$1" 'NR == 1 { n = NF; next }
+		$NF == dev { s = 0; for (i = 2; i <= n + 1; i++) s += $i; print s; exit }' /proc/interrupts
+}
+dt_u32() { od -An -tu4 --endian=big "$1" 2>/dev/null | tr -d ' '; }
+
+# --- GRUB ---------------------------------------------------------------------------
+# Find the GRUB that the firmware boots: the EFI stub's "search.fs_uuid X root" and
+# "set prefix=($root)'/boot/grub'" name the partition and directory of the real menu.
+grub_find() {
+	esp="" stub=""
+	for m in /boot/efi /efi /boot; do
+		[ -d "$m/EFI" ] && { esp=$m; break; }
+	done
+	[ -n "$esp" ] || return 1
+	# Prefer the loader the firmware booted this time (BootCurrent), if efivars work.
+	dir=$(efibootmgr 2>/dev/null | awk '
+		/^BootCurrent:/ { cur = "Boot" $2 }
+		cur && index($0, cur) == 1 && match($0, /\\EFI\\[^\\]+\\/) {
+			print substr($0, RSTART + 5, RLENGTH - 6) }')
+	if [ -n "$dir" ]; then
+		for d in "$esp"/EFI/*/; do
+			[ "$(basename "$d" | tr '[:upper:]' '[:lower:]')" = "$(echo "$dir" | tr '[:upper:]' '[:lower:]')" ] &&
+				[ -f "$d/grub.cfg" ] && stub=$d/grub.cfg
+		done
+	fi
+	if [ -z "$stub" ]; then
+		set -- "$esp"/EFI/*/grub.cfg
+		[ $# -eq 1 ] && [ -f "$1" ] && stub=$1
+		[ $# -gt 1 ] && { echo "several GRUB stubs ($*); pass --grub=DEV"; return 1; }
+	fi
+	[ -n "$stub" ] || return 1
+	# The first UUID-like word on a "search" line (search.fs_uuid X root, or
+	# search --no-floppy --fs-uuid --set=root X).
+	uuid=$(awk '/search/ { for (i = 2; i <= NF; i++)
+		if ($i ~ /^[0-9A-Fa-f-]+$/ && index($i, "-") && length($i) >= 9) { print $i; exit } }' "$stub")
+	prefix=$(sed -n "s/.*set prefix=(\$root)'\{0,1\}\([^' ]*\)'\{0,1\}.*/\1/p" "$stub" | head -1)
+	[ -n "$uuid" ] || return 1
+	dev=$(blkid -U "$uuid" 2>/dev/null) || return 1
+	echo "$dev ${prefix:-/boot/grub}"
+}
+
+grub_show() {
+	src=$1 prefix=/boot/grub mnt=""
+	if [ "$src" = auto ]; then
+		found=$(grub_find) || { echo "GRUB: not found${found:+: $found} (pass --grub=DEV)"; return; }
+		src=${found% *} prefix=${found#* }
+	fi
+	case $src in UUID=*) src=$(blkid -U "${src#UUID=}" 2>/dev/null) || { echo "GRUB: no such UUID"; return; } ;; esac
+	if [ -d "$src" ]; then
+		if [ -f "$src/grubenv" ]; then gdir=$src
+		elif [ -f "$src/boot/grub/grubenv" ]; then gdir=$src/boot/grub
+		else gdir=$src/grub; fi
+	elif [ -b "$src" ]; then
+		m=$(findmnt -n -o TARGET -S "$src" 2>/dev/null | head -1)
+		if [ -z "$m" ]; then
+			mnt=$(mktemp -d)
+			opts=ro; [ "$(blkid -o value -s TYPE "$src")" = ext4 ] && opts=ro,noload
+			mount -o "$opts" "$src" "$mnt" 2>/dev/null || { rmdir "$mnt"; echo "GRUB: can't mount $src"; return; }
+			trap 'umount "$mnt"; rmdir "$mnt"' EXIT
+			trap 'exit 1' INT TERM
+			m=$mnt
+		fi
+		# A separate /boot partition holds grub/ at its top; a root partition, boot/grub.
+		if [ -d "$m$prefix" ]; then gdir=$m$prefix; else gdir=$m/grub; fi
+	else
+		echo "GRUB: $src is neither a block device nor a directory"; return
+	fi
+	if [ ! -f "$gdir/grubenv" ]; then
+		echo "GRUB: no grubenv in $src"
+	else
+		echo "GRUB menu: $src"
+		cfgs=""
+		for f in "$gdir/grub.cfg" "$gdir/custom.cfg"; do [ -f "$f" ] && cfgs="$cfgs $f"; done
+		for key in saved_entry next_entry; do
+			id=$(sed -n "s/^$key=//p" "$gdir/grubenv")
+			[ -n "$id" ] || continue
+			# GRUB matches an entry by ID or title; IDs can be "submenu>entry".
+			# shellcheck disable=SC2086 # $cfgs is a list of files
+			title=$(awk -v id="${id##*>}" -v q="'" '
+				/^[[:space:]]*menuentry[[:space:]]/ &&
+				(index($0, q id q) || index($0, "\"" id "\"")) {
+					t = $0; sub(/^[[:space:]]*menuentry[[:space:]]+/, "", t)
+					c = substr(t, 1, 1); t = substr(t, 2)
+					print substr(t, 1, index(t, c) - 1); exit }' $cfgs)
+			if [ $key = next_entry ]; then
+				echo "  next boot: ${title:-$(echo "$id" | nouuid)} (one-shot, armed)"
+				continue
+			fi
+			echo "  default:   ${title:-$(echo "$id" | nouuid)}"
+			[ -n "$title" ] || continue
+			# shellcheck disable=SC2086
+			block=$(awk -v t="$title" -v q="'" '
+				/^[[:space:]]*menuentry[[:space:]]/ && (index($0, q t q) || index($0, "\"" t "\"")) { on = 1 }
+				on { print } on && /^[[:space:]]*}/ { exit }' $cfgs)
+			dtb=$(echo "$block" | awk '$1 == "devicetree" { print $2; exit }')
+			cmd=$(echo "$block" | awk '$1 == "linux" { print; exit }')
+			case $cmd in *fw_devlink.sync_state=timeout*) sync=yes ;; *) sync=no ;; esac
+			msd=$(echo "$cmd" | sed -n 's/.*mem_sleep_default=\([a-z0-9]*\).*/\1/p')
+			echo "  default entry: devicetree ${dtb:-none}, mem_sleep_default=${msd:-unset}," \
+				"fw_devlink.sync_state=timeout $sync"
+		done
+		grep -q '^saved_entry=' "$gdir/grubenv" || echo "  default: no saved_entry (grub.cfg's own default)"
+	fi
+	if [ -n "$mnt" ]; then
+		umount "$mnt"; rmdir "$mnt"
+		trap - EXIT INT TERM
+	fi
+}
+
+# --- boot ---------------------------------------------------------------------------
+echo "== boot"
+echo "kernel $kver, up since $(uptime -s)"
+echo "machine: $(cat /sys/class/dmi/id/product_sku 2>/dev/null), DT $(tr '\0' ' ' < /proc/device-tree/compatible | cut -d' ' -f1)"
+echo "suspends this boot: $(cat /sys/power/suspend_stats/success) ok, $(cat /sys/power/suspend_stats/fail) failed"
+res=$(dt_u32 /proc/device-tree/cpus/domain-idle-states/domain-sleep-0/min-residency-us)
+if [ -n "$res" ]; then ss3="min-residency $res us"; else ss3=missing; fi
+echo "DTB: IR camera $(yn '[ -e /proc/device-tree/soc@0/cci@ac15000/i2c-bus@0/camera@10 ]')," \
+	"domain_ss3 $ss3"
+echo "cmdline: fw_devlink.sync_state=timeout $(yn 'grep -q fw_devlink.sync_state=timeout /proc/cmdline')," \
+	"mem_sleep $(cat /sys/power/mem_sleep)"
+if [ "$grub" != no ]; then
+	if [ $root = yes ]; then grub_show "$grub"; else echo "GRUB: needs root"; fi
+fi
+
+# --- IR camera ----------------------------------------------------------------------
+echo
+echo "== IR camera and face unlock"
+# The CCI adapter number differs between kernels, so match any bus.
+echo "vd55g0: $(modinfo -n vd55g0 2>/dev/null || echo 'not installed'), sensor bound:" \
+	"$(yn 'ls /sys/bus/i2c/drivers/vd55g0 | grep -q -- -0010')"
+camss=""
+for m in /sys/bus/media/devices/media*; do
+	[ -e "$m" ] || continue
+	case $(cat "$m/model" 2>/dev/null) in *"Camera Subsystem"*) camss=/dev/${m##*/} ;; esac
+done
+if [ -n "$camss" ]; then
+	echo "CAMSS $camss sensors: $(media-ctl -d "$camss" -p 2>/dev/null |
+		sed -n 's/^- entity [0-9]*: \([a-z0-9]*\) [0-9]*-[0-9a-f]* .*/\1/p' | tr '\n' ' ')"
+else
+	echo "CAMSS media device: none"
+fi
+howdy="" seen=""
+for f in /etc/pam.d/* /usr/lib/pam.d/*; do
+	[ -f "$f" ] || continue
+	s=${f##*/}
+	case " $seen " in *" $s "*) continue ;; esac	# /etc overrides /usr/lib
+	seen="$seen $s"
+	grep -q '^[^#]*pam_howdy' "$f" && howdy="$howdy $s"
+done
+echo "PAM services using Howdy:${howdy:- none}"
+if [ $root = yes ]; then
+	echo "face models: $(python3 -I -c '
+import glob, json
+files = glob.glob("/etc/howdy/models/*.dat")
+n = sum(len(json.load(open(f))) for f in files)
+print(f"{n} in {len(files)} file(s)")' 2>/dev/null || echo none)"
+fi
+user=${SUDO_USER:-$(id -un)}
+home=$(getent passwd "$user" | cut -d: -f6)
+niri=$home/.config/niri/config.kdl
+if [ -r "$niri" ]; then
+	key=$(sed -n 's/^[[:space:]]*\([A-Za-z0-9_+][A-Za-z0-9_+]*\)[^{]*{[^}]*spawn "swaylock".*/\1/p' "$niri" | head -1)
+	echo "niri: lock key ${key:-none}, swayidle locks before sleep" \
+		"$(yn "grep -q 'before-sleep.*swaylock' '$niri'")"
+fi
+
+# --- touch --------------------------------------------------------------------------
+echo
+echo "== touchpad and touchscreen"
+echo "spi_hid running: $(cat /sys/module/spi_hid/version 2>/dev/null || echo 'no version')" \
+	"($(cat /sys/module/spi_hid/srcversion 2>/dev/null || echo 'not loaded'))," \
+	"next boot: $(modinfo -n spi_hid 2>/dev/null || echo 'not installed')"
+for dev in spi0.0:touchpad spi1.0:touchscreen; do
+	d=/sys/bus/spi/devices/${dev%:*}
+	[ -e "$d" ] || { echo "${dev#*:} ${dev%:*}: absent"; continue; }
+	echo "${dev#*:} ${dev%:*}: $(cat "$d/ready" 2>/dev/null || echo '?'), bus errors $(cat "$d/bus_error_count" 2>/dev/null || echo '?')," \
+		"device resets $(cat "$d/device_initiated_reset_count" 2>/dev/null || echo '?'), irqs $(irqs "${dev%:*}" | grep . || echo none)"
+done
+svcs=""
+for s in sl7-pos-events sl7-touchpad-diag; do
+	st=$(systemctl is-enabled "$s" 2>/dev/null)
+	if [ -z "$st" ] || [ "$st" = not-found ]; then continue; fi
+	svcs="$svcs $s=$st"
+	[ "$s" = sl7-pos-events ] && svcs="$svcs/$(systemctl show -P Result "$s" 2>/dev/null)"
+done
+echo "touchpad services:${svcs:- none}"
+if [ $root = yes ]; then
+	k=$(journalctl -b -q -t sl7-touchpad -g 'kick: after' -o cat 2>/dev/null)
+	[ -n "$k" ] && { echo "kick results this boot:"; echo "$k" | sed 's/^/  /'; }
+fi
+
+# --- deep sleep ---------------------------------------------------------------------
+echo
+echo "== deep sleep"
+case $(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/power/mem_sleep) in
+deep) echo "mode: deep (reaches CX collapse on 7.3 at EL1)" ;;
+*) echo "mode: s2idle (stays shallow at EL1: echo deep > /sys/power/mem_sleep, or boot with mem_sleep_default=deep)" ;;
+esac
+for cc in 100000.clock-controller:gcc 3d90000.clock-controller:gpucc; do
+	printf '%s state_synced=%s  ' "${cc#*:}" "$(cat "/sys/bus/platform/devices/${cc%:*}/state_synced" 2>/dev/null)"
+done
+echo
+echo "qcrypto bound $(yn 'ls /sys/bus/platform/drivers/qcrypto/ | grep -q "\."')," \
+	"qcom_adsp_pwr_lmts $(yn '[ -d /sys/module/qcom_adsp_pwr_lmts ]')"
+if [ $root = yes ]; then
+	[ -d $D/qcom_stats ] || modprobe qcom_stats 2>/dev/null
+	awk 'NR > 1 { print "system PD idle state " $1 ": usage " $3 ", rejected " $4 }' \
+		$D/pm_genpd/power-domain-system/idle_states 2>/dev/null
+	for s in aosd cxsd ddr; do printf '%s=%s ' $s "$(sed -n 's/^Count: //p' $D/qcom_stats/$s 2>/dev/null)"; done
+	echo "(SoC deep states entered since boot; all 0 = shallow sleep)"
+else
+	echo "(run with sudo for the SoC sleep counters)"
+fi
+hook=no
+for h in /usr/lib/systemd/system-sleep/sl7-sleep-stats /etc/systemd/system-sleep/sl7-sleep-stats; do
+	[ -x "$h" ] && hook=yes
+done
+log=/var/log/sl7-sleep.log
+if [ -r $log ]; then
+	echo "sleep log: $(grep -c ' post ' $log) resumes logged (hook installed: $hook); per suspend: $tools/sleep/sleep-report"
+else
+	echo "sleep log: none (hook installed: $hook)"
+fi
+hooks=""
+for h in /usr/lib/systemd/system-sleep/* /etc/systemd/system-sleep/*; do
+	[ -x "$h" ] && hooks="$hooks ${h##*/}"
+done
+echo "all sleep hooks:${hooks:- none}"
+
+# --- kernel updates -----------------------------------------------------------------
+echo
+echo "== kernel-update hazards"
+find "/lib/modules/$kver/updates" -name '*.ko*' 2>/dev/null | while read -r m; do
+	vm=$(modinfo -F vermagic "$m" | cut -d' ' -f1)
+	echo "out-of-tree: ${m##*/} (built for $vm)$([ "$vm" = "$kver" ] || echo '  !! does not match')"
+done
+echo "initrd: $(date -r "/boot/initrd.img-$kver" +%F 2>/dev/null || echo missing)"
+# Every installed kernel needs its own DTB link and its own out-of-tree modules.
+for v in /boot/vmlinuz-*; do
+	[ -e "$v" ] || continue
+	k=${v#/boot/vmlinuz-}
+	miss=""
+	[ -e "/boot/dtb-$k" ] || miss="$miss /boot/dtb-$k"
+	for mod in vd55g0 qcom_adsp_pwr_lmts; do
+		find "/lib/modules/$k/updates" -name "$mod.ko*" 2>/dev/null | grep -q . || miss="$miss $mod"
+	done
+	if [ -n "$miss" ]; then echo "kernel $k: missing$miss"; else echo "kernel $k: DTB link, vd55g0 and qcom_adsp_pwr_lmts present"; fi
+done
+echo "DTB rebuild for a kernel: $tools/dtb/build-dtbs [--install] <kver>"
