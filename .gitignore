@@ -1,0 +1,31 @@
+# Build output and anything that must not be redistributed (see tools/dev/scrub-check).
+*.o
+*.ko
+*.mod*
+*.cmd
+.*.cmd
+Module.symvers
+modules.order
+*.dtb
+*.dtbo
+out/
+build/
+__pycache__/
+*.pyc
+# Keys, firmware, images and packages
+*.pem
+*.key
+*.x509
+*.bin
+*.mbn
+*.elf
+*.inf
+*.raw
+*.pgm
+*.png
+*.jpg
+*.deb
+*.changes
+*.buildinfo
+# Local test output
+test-logs/
