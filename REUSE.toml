@@ -9,3 +9,24 @@ SPDX-License-Identifier = "CC-BY-4.0"
 path = [".gitignore", ".githooks/**", ".github/**", "REUSE.toml", "tools/dev/scrub-allow-paths", "**/series"]
 SPDX-FileCopyrightText = "2026 Anthony Johnson"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["patches/**/*.md"]
+SPDX-FileCopyrightText = "2026 Anthony Johnson"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# Kernel patches take the license of the files they change.
+[[annotations]]
+path = ["patches/kernel-7.3/0001-*.patch", "patches/kernel-7.3/0002-*.patch", "patches/kernel-7.3/0003-*.patch", "patches/kernel-7.3/0005-*.patch", "patches/kernel-7.3/build/*.patch"]
+SPDX-FileCopyrightText = "2026 Anthony Johnson"
+SPDX-License-Identifier = "GPL-2.0-only"
+
+[[annotations]]
+path = ["patches/kernel-7.3/0004-*.patch"]
+SPDX-FileCopyrightText = "2026 Anthony Johnson"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = ["config/kernel/**"]
+SPDX-FileCopyrightText = "The Linux kernel authors; 2026 Anthony Johnson"
+SPDX-License-Identifier = "GPL-2.0-only"

@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:20:36 +0000
+Subject: [PATCH 1/5] HID: spi-hid: recover when a reset cuts off GET_FEATURE
+
+A reset response is taken as the answer to whatever request is pending.
+For GET_FEATURE that turned a device-initiated reset into a zero-filled
+success: spi_hid_device_reset() never ran, so the reset was not counted,
+the descriptors were not re-read and iptsd never re-applied its mode:
+the stuck-in-default-mode case that the SL7 kit's patch 0008 exists for.
+GET_FEATURE does not ask for a reset, so run the same recovery there.
+SET_FEATURE keeps treating a reset as its answer, since a mode change
+may reset the device.
+
+Assisted-by: LLM
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index 0761a3111..ae3f19aab 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -388,7 +388,10 @@ static bool spi_hid_recent(unsigned long stamp, unsigned int ms)
+ 	return stamp && time_before(jiffies, stamp + msecs_to_jiffies(ms));
+ }
+ 
+-/* IRQ thread: the device sent a reset response that no request asked for. */
++/*
++ * The device sent a reset response that no request asked for: from the IRQ
++ * thread, or from a GET_FEATURE that got the reset instead of its answer.
++ */
+ static void spi_hid_device_reset(struct spi_hid *shid)
+ {
+ 	struct device *dev = &shid->spi->dev;
+@@ -974,6 +977,11 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
+ 		}
+ 
+ 		if (shid->resp_type == SPI_HID_REPORT_TYPE_RESET_RESP) {
++			/*
++			 * GET_FEATURE does not ask for a reset, so the device
++			 * reset on its own and took this request's slot.
++			 */
++			spi_hid_device_reset(shid);
+ 			memset(buf, 0, len);
+ 			buf[0] = reportnum;
+ 			ret = len;

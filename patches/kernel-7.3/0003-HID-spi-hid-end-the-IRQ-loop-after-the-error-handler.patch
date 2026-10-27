@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:21:35 +0000
+Subject: [PATCH 3/5] HID: spi-hid: end the IRQ loop after the error handler
+ gives up
+
+When the error handler runs out of attempts it powers the device down
+but leaves the IRQ armed. The IRQ thread then returned IRQ_HANDLED
+without reading anything, so an unpowered device holding the
+level-triggered line asserted kept the oneshot IRQ firing until the next
+suspend, and the storm mask never tripped because nothing counted.
+
+Count these as errors so the existing storm mask ends the loop.
+spi_hid_stop() and spi_hid_start() already balance that mask, so the
+next resume brings the device back, and there is no second owner of
+irq_enabled to race with spi_hid_stop().
+
+Assisted-by: LLM
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index cdcebf48e..466829a07 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -700,8 +700,18 @@ static irqreturn_t spi_hid_irq_thread(int irq, void *_shid)
+ 	unsigned int reads = 0;
+ 
+ 	do {
+-		if (!shid->powered || READ_ONCE(shid->stopping))
++		if (READ_ONCE(shid->stopping))
+ 			break;
++		if (!shid->powered) {
++			/*
++			 * Off without a stop: the error handler gave up. The
++			 * unpowered device may hold the line asserted, so count
++			 * it and let the storm mask end the loop.
++			 */
++			if (++shid->bus_error_count >= SPI_HID_IRQ_STORM_ERRORS)
++				spi_hid_irq_storm(shid);
++			break;
++		}
+ 		if (!spi_hid_read_input(shid))
+ 			break;
+ 		/*

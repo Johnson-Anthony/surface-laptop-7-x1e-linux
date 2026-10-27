@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:03:45 +0000
+Subject: [PATCH 4/5] arm64: dts: qcom: x1e80100-romulus: keep runtime cpuidle
+ out of SS3
+
+Raise domain_ss3 min-residency to 10 s on the Surface Laptop 7. s2idle
+selects the system idle state by latency only (cpu_system_power_down_ok),
+so suspend still enters SS3; runtime cpuidle also requires the predicted
+idle time to cover the residency (cpu_power_down_ok), so it never does.
+Other X1E laptops hung when the system state was entered at runtime.
+
+Assisted-by: LLM
+---
+ arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+index 9f45ad930..94fd81d6e 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+@@ -859,6 +859,15 @@
+ 	};
+ };
+ 
++&domain_ss3 {
++	/*
++	 * s2idle picks the system state by latency alone, so suspend still
++	 * reaches SS3. Runtime cpuidle also needs the residency, which keeps
++	 * it out of SS3 while the laptop is in use.
++	 */
++	min-residency-us = <10000000>;
++};
++
+ &gpu {
+ 	status = "okay";
+ };

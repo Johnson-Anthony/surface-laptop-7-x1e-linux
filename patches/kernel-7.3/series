@@ -1,0 +1,5 @@
+0001-HID-spi-hid-recover-when-a-reset-cuts-off-GET_FEATUR.patch
+0002-HID-spi-hid-mask-the-IRQ-across-in-driver-reset-puls.patch
+0003-HID-spi-hid-end-the-IRQ-loop-after-the-error-handler.patch
+0004-arm64-dts-qcom-x1e80100-romulus-keep-runtime-cpuidle.patch
+0005-HID-spi-hid-power-up-beside-resume-not-inside-it.patch

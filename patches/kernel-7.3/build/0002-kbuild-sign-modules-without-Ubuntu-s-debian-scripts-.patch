@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 01:05:15 +0000
+Subject: [PATCH 2/2] kbuild: sign modules without Ubuntu's
+ debian/scripts/sign-module gate
+
+Ubuntu only signs a module when debian/scripts/sign-module exists and
+accepts it. linux-source ships without Ubuntu's debian/ packaging, so
+bindeb-pkg printed SIGN for every module but signed none, and the first
+module load tainted the kernel (E). Restore the upstream rule.
+
+Assisted-by: LLM
+---
+ scripts/Makefile.modinst | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/scripts/Makefile.modinst b/scripts/Makefile.modinst
+index 19eccef32..9ba45e5b3 100644
+--- a/scripts/Makefile.modinst
++++ b/scripts/Makefile.modinst
+@@ -105,11 +105,8 @@ else
+ sig-key := $(CONFIG_MODULE_SIG_KEY)
+ endif
+ quiet_cmd_sign = SIGN    $@
+-      cmd_sign = if test -e $(srctree)/debian/scripts/sign-module && \
+-                    $(srctree)/debian/scripts/sign-module $@ ; \
+-                 then $(objtree)/scripts/sign-file $(CONFIG_MODULE_SIG_HASH) "$(sig-key)" $(objtree)/certs/signing_key.x509 $@ \
+-                      $(if $(KBUILD_EXTMOD),|| true) ; \
+-                 fi
++      cmd_sign = $(objtree)/scripts/sign-file $(CONFIG_MODULE_SIG_HASH) "$(sig-key)" $(objtree)/certs/signing_key.x509 $@ \
++                 $(if $(KBUILD_EXTMOD),|| true)
+ 
+ ifeq ($(sign-only),)
+ 

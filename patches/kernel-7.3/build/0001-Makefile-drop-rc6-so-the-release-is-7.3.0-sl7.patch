@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 00:05:36 +0000
+Subject: [PATCH 1/2] Makefile: drop -rc6 so the release is 7.3.0-sl7
+
+Ubuntu 7.3.0-9.9 is built from 7.3-rc6 but versioned 7.3.0; the ItsLucas CI
+also builds with EXTRAVERSION= for the same reason.
+
+Assisted-by: LLM
+---
+ Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 3a3290973..1c51f31d4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ VERSION = 7
+ PATCHLEVEL = 3
+ SUBLEVEL = 0
+-EXTRAVERSION = -rc6
++EXTRAVERSION =
+ NAME = Baby Opossum Posse
+ 
+ # *DOCUMENTATION*

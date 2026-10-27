@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 08:46:38 +0000
+Subject: [PATCH 5/5] HID: spi-hid: power up beside resume, not inside it
+
+spi_hid_start() sleeps through the supply's startup delay, the reset
+pulse and the firmware's 2 s start. The touchpad ran it from its PM resume
+callback, so every system resume waited about 3 s for it (deep resume on
+the Surface Laptop 7: resume began ~449.5 s, "SL7 power on" 452.86 s,
+"PM: suspend exit" 453.56 s). The touchscreen, a panel follower, queued
+the same power-up on system_freezable_wq, so it only started after thaw
+and its input came back ~2.7 s after userspace did.
+
+Queue both on system_unbound_wq instead. The power-up now overlaps the
+rest of resume. Enumeration is unchanged: the IRQ is armed only after the
+full settle, and reset_work and the start watchdog stay on the freezable
+workqueue, so the HID device still appears after thaw. Suspend cancels a
+power-up that is still pending before it stops the device, as panel_off
+already did. At runtime nothing changes, since the freezable workqueue is
+only frozen during system sleep.
+
+Assisted-by: LLM
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 32 +++++++++++++++++-------------
+ drivers/hid/spi-hid/spi-hid-core.h |  2 +-
+ 2 files changed, 19 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index 466829a07..86eecc8e0 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -1159,24 +1159,29 @@ static int spi_hid_stop(struct spi_hid *shid)
+ 	return ret;
+ }
+ 
+-static void spi_hid_panel_work(struct work_struct *work)
++/*
++ * Power-up sleeps through the supply's startup delay, the reset pulse and the
++ * firmware's 2 s start, so run it beside resume or display enable instead of
++ * inside them. Enumeration still waits for thaw: reset_work and the start
++ * watchdog are on the freezable workqueue.
++ */
++static void spi_hid_start_work(struct work_struct *work)
+ {
+-	struct spi_hid *shid = container_of(work, struct spi_hid, panel_work);
++	struct spi_hid *shid = container_of(work, struct spi_hid, start_work);
+ 	int ret;
+ 
+ 	mutex_lock(&shid->power_lock);
+ 	ret = spi_hid_start(shid);
+ 	mutex_unlock(&shid->power_lock);
+ 	if (ret)
+-		dev_err(&shid->spi->dev, "Panel touch resume failed: %d\n", ret);
++		dev_err(&shid->spi->dev, "Power on failed: %d\n", ret);
+ }
+ 
+ static int spi_hid_panel_on(struct drm_panel_follower *follower)
+ {
+ 	struct spi_hid *shid = container_of(follower, struct spi_hid, panel_follower);
+ 
+-	/* Do not delay display enable or enumerate children until thaw. */
+-	queue_work(system_freezable_wq, &shid->panel_work);
++	queue_work(system_unbound_wq, &shid->start_work);
+ 	return 0;
+ }
+ 
+@@ -1185,7 +1190,7 @@ static int spi_hid_panel_off(struct drm_panel_follower *follower)
+ 	struct spi_hid *shid = container_of(follower, struct spi_hid, panel_follower);
+ 	int ret;
+ 
+-	cancel_work_sync(&shid->panel_work);
++	cancel_work_sync(&shid->start_work);
+ 	mutex_lock(&shid->power_lock);
+ 	ret = spi_hid_stop(shid);
+ 	mutex_unlock(&shid->power_lock);
+@@ -1205,6 +1210,8 @@ static int spi_hid_suspend(struct device *dev)
+ 	/* The display driver already controls followers during system sleep. */
+ 	if (shid->is_panel_follower)
+ 		return 0;
++	/* The last resume's power-up may still be running. */
++	cancel_work_sync(&shid->start_work);
+ 	mutex_lock(&shid->power_lock);
+ 	ret = spi_hid_stop(shid);
+ 	if (ret)
+@@ -1216,14 +1223,11 @@ static int spi_hid_suspend(struct device *dev)
+ static int spi_hid_resume(struct device *dev)
+ {
+ 	struct spi_hid *shid = dev_get_drvdata(dev);
+-	int ret;
+ 
+ 	if (shid->is_panel_follower)
+ 		return 0;
+-	mutex_lock(&shid->power_lock);
+-	ret = spi_hid_start(shid);
+-	mutex_unlock(&shid->power_lock);
+-	return ret;
++	queue_work(system_unbound_wq, &shid->start_work);
++	return 0;
+ }
+ 
+ static DEFINE_SIMPLE_DEV_PM_OPS(spi_hid_pm_ops, spi_hid_suspend, spi_hid_resume);
+@@ -1349,7 +1353,7 @@ static int spi_hid_probe(struct spi_device *spi)
+ 	complete(&shid->output_done);
+ 
+ 	INIT_WORK(&shid->reset_work, spi_hid_reset_work);
+-	INIT_WORK(&shid->panel_work, spi_hid_panel_work);
++	INIT_WORK(&shid->start_work, spi_hid_start_work);
+ 	INIT_DELAYED_WORK(&shid->start_watchdog, spi_hid_start_watchdog);
+ 
+ 	shid->supply = devm_regulator_get_optional(dev, "vdd");
+@@ -1477,7 +1481,7 @@ static void spi_hid_shutdown(struct spi_device *spi)
+ 		drm_panel_remove_follower(&shid->panel_follower);
+ 		shid->follower_registered = false;
+ 	}
+-	cancel_work_sync(&shid->panel_work);
++	cancel_work_sync(&shid->start_work);
+ 	mutex_lock(&shid->power_lock);
+ 	ret = spi_hid_stop(shid);
+ 	mutex_unlock(&shid->power_lock);
+@@ -1530,4 +1534,4 @@ module_spi_driver(spi_hid_driver);
+ 
+ MODULE_DESCRIPTION("HID over SPI (HIDSPI v3) QSPI transport driver");
+ MODULE_LICENSE("GPL");
+-MODULE_VERSION("sl7.20260927.2");
++MODULE_VERSION("sl7.20261026.1");
+diff --git a/drivers/hid/spi-hid/spi-hid-core.h b/drivers/hid/spi-hid/spi-hid-core.h
+index 5bf81b0c9..aec89e5fd 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.h
++++ b/drivers/hid/spi-hid/spi-hid-core.h
+@@ -143,7 +143,7 @@ struct spi_hid {
+ 	struct pinctrl_state *pinctrl_active;
+ 	struct pinctrl_state *pinctrl_sleep;
+ 	struct work_struct reset_work;
+-	struct work_struct panel_work;
++	struct work_struct start_work;
+ 	struct drm_panel_follower panel_follower;
+ 	struct mutex power_lock;
+ 

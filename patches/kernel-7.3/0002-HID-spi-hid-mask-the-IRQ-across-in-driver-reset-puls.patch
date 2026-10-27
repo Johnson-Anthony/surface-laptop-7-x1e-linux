@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 22:21:16 +0000
+Subject: [PATCH 2/5] HID: spi-hid: mask the IRQ across in-driver reset pulses
+ and power cycles
+
+Two problems kept the in-driver recovery from working:
+
+- The retry pulse in reset_work and the error handler's pulse selected
+  the 'reset' state with the IRQ armed. On the Romulus15 DT this
+  machine boots, that state also drives the rail enable (gpio65 for the
+  touchpad, gpio64 for the touchscreen) low, so the IRQ thread read
+  headers from an unpowered or booting device. If the line is held
+  asserted, the bad headers trip the storm mask within the pulse.
+- The storm mask was only dropped by spi_hid_stop(). The disable/enable
+  pair in spi_hid_power_cycle_once() left it in place, so the power
+  cycle, the reset pulses and the GET_DD/GET_RD that follow ran with the
+  line masked, and every response timed out until the next suspend.
+
+Pulse reset in one helper that masks the IRQ for the pulse and settle,
+like spi_hid_power_cycle_once() already does for the power cycle. A
+level-triggered reset response stays pending until the line is unmasked.
+Both helpers and spi_hid_stop() drop a storm mask after their
+disable_irq() has waited out the IRQ thread, via xchg so that concurrent
+callers enable only once, and restart the error count.
+
+Assisted-by: LLM
+---
+ drivers/hid/spi-hid/spi-hid-core.c | 82 +++++++++++++++++++-----------
+ 1 file changed, 53 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index ae3f19aab..cdcebf48e 100644
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -300,6 +300,48 @@ static int spi_hid_supply_off(struct spi_hid *shid)
+ 	return 0;
+ }
+ 
++/*
++ * Call after disable_irq(), which waits out the IRQ thread: drop the thread's
++ * storm mask so the caller's enable_irq() really re-arms the line.
++ */
++static void spi_hid_drop_storm_mask(struct spi_hid *shid)
++{
++	if (xchg(&shid->irq_storm, false))
++		enable_irq(shid->spi->irq);
++}
++
++/*
++ * Pulse reset with the IRQ masked. Where the 'reset' state also switches the
++ * rail off, the unpowered device can hold a level-triggered line asserted;
++ * a masked line keeps the reset response pending until the settle is over.
++ */
++static int spi_hid_reset_pulse(struct spi_hid *shid, unsigned int settle_ms)
++{
++	struct device *dev = &shid->spi->dev;
++	int ret;
++
++	disable_irq(shid->spi->irq);
++	spi_hid_drop_storm_mask(shid);
++
++	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_reset);
++	if (ret) {
++		dev_err(dev, "Reset assert failed\n");
++		goto out;
++	}
++	msleep(SPI_HID_RESET_ASSERT_MS);
++
++	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_active);
++	if (ret) {
++		dev_err(dev, "Reset deassert failed\n");
++		goto out;
++	}
++	msleep(settle_ms);
++out:
++	shid->bus_error_count = 0;
++	enable_irq(shid->spi->irq);
++	return ret;
++}
++
+ /* Reset pulses did not revive the device: remove power once per start. */
+ static bool spi_hid_power_cycle_once(struct spi_hid *shid)
+ {
+@@ -313,9 +355,11 @@ static bool spi_hid_power_cycle_once(struct spi_hid *shid)
+ 	shid->power_cycled = true;
+ 	/* An unpowered device may hold a level-triggered line asserted. */
+ 	disable_irq(shid->spi->irq);
++	spi_hid_drop_storm_mask(shid);
+ 	ret = spi_hid_supply_off(shid);
+ 	if (!ret)
+ 		ret = spi_hid_power_up(shid);
++	shid->bus_error_count = 0;
+ 	enable_irq(shid->spi->irq);
+ 	if (ret) {
+ 		dev_err(dev, "Power cycle failed: %d\n", ret);
+@@ -361,23 +405,11 @@ static int spi_hid_error_handler(struct spi_hid *shid)
+ 
+ 	shid->ready = false;
+ 
+-	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_reset);
+-	if (ret) {
+-		dev_err(dev, "Reset assert failed\n");
+-		return ret;
+-	}
+ 	shid->power_state = SPI_HID_POWER_MODE_OFF;
+-
+-	msleep(SPI_HID_RESET_ASSERT_MS);
+-
+-	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
+-	ret = pinctrl_select_state(shid->pinctrl, shid->pinctrl_active);
+-	if (ret) {
+-		dev_err(dev, "Reset deassert failed\n");
++	ret = spi_hid_reset_pulse(shid, SPI_HID_POST_DIR_DELAY_MS);
++	if (ret)
+ 		return ret;
+-	}
+-
+-	msleep(SPI_HID_POST_DIR_DELAY_MS);
++	shid->power_state = SPI_HID_POWER_MODE_ACTIVE;
+ 
+ 	return 0;
+ }
+@@ -552,8 +584,8 @@ static int spi_hid_process_input_report(struct spi_hid *shid,
+ 
+ /*
+  * IRQ thread: too many consecutive errors. Mask the line until the next stop,
+- * which balances this disable, so a later resume or panel enable can revive
+- * the device instead of finding its IRQ still disabled.
++ * reset pulse or power cycle, which balance this disable, so recovery or a
++ * later resume can revive the device instead of finding its IRQ disabled.
+  */
+ static void spi_hid_irq_storm(struct spi_hid *shid)
+ {
+@@ -717,12 +749,8 @@ static void spi_hid_reset_work(struct work_struct *work)
+ 			return;
+ 		}
+ 
+-		if (attempt > 0) {
+-			pinctrl_select_state(shid->pinctrl, shid->pinctrl_reset);
+-			msleep(SPI_HID_RESET_ASSERT_MS);
+-			pinctrl_select_state(shid->pinctrl, shid->pinctrl_active);
+-			msleep(2000);
+-		}
++		if (attempt > 0)
++			spi_hid_reset_pulse(shid, 2000);
+ 
+ 		for (dd_try = 0; dd_try < SPI_HID_MAX_INIT_RETRIES; dd_try++) {
+ 			ret = spi_hid_sync_request(shid,
+@@ -1100,13 +1128,9 @@ static int spi_hid_stop(struct spi_hid *shid)
+ 
+ 	WRITE_ONCE(shid->stopping, true);
+ 	if (shid->irq_enabled) {
+-		/* Waits for the IRQ thread, so irq_storm is stable afterwards. */
++		/* The line stays masked by this disable alone. */
+ 		disable_irq(shid->spi->irq);
+-		if (shid->irq_storm) {
+-			/* Drop the thread's own disable; the line stays masked. */
+-			enable_irq(shid->spi->irq);
+-			shid->irq_storm = false;
+-		}
++		spi_hid_drop_storm_mask(shid);
+ 		shid->irq_enabled = false;
+ 	}
+ 	complete_all(&shid->output_done);
