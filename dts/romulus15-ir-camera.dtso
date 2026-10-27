@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-FileCopyrightText: 2026 Anthony Johnson
+/*
+ * Surface Laptop 7 (X1E80100): Windows Hello IR camera, ST VD55G0.
+ * Tested on a 13.8" (model 2036), which boots the romulus15 DTB because the
+ * community SL7 kernel kit adds its features to romulus15 only. The 15" model is
+ * untested and may be wired differently. See docs/ir-camera.md.
+ *
+ * Overlay for x1e80100-microsoft-romulus15.dtb, built with __symbols__ (dtc -@).
+ * If the base has no PM8010 L2M/L4M (no ldo2/ldo4 under regulators-8, as in the
+ * 7.3 kernel), apply romulus15-ir-camera-rails.dtso first. tools/dtb/build-dtbs
+ * does both.
+ *
+ * From the Windows driver store: I2C 0x10 on CCI0 bus 0, reset GPIO109, rails
+ * L4M 1.8 V / L2M 1.2 V / L6M 1.8 V, 24 MHz MCLK, one data lane, strobe on sensor
+ * GPIO1, which fires the IR flood LED.
+ * Inferred from the Qualcomm reference IR slot (Asus Zenbook A14) and confirmed by
+ * streaming: CSIPHY0 and MCLK0 (gpio96).
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/clock/qcom,x1e80100-camcc.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+
+/* PM8010 LDO6 is missing from the base DT. Windows votes it at 1.8 V; pin it there. */
+&{/soc@0/rsc@17500000/regulators-8} {
+	vreg_l6m_1p8: ldo6 {
+		regulator-name = "vreg_l6m_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+	};
+};
+
+/*
+ * IR flood LED: fired in hardware by the sensor's GPIO1 strobe (st,leds below;
+ * V4L2 control led_mode=1). PM8550 flash channel 4 (Zenbook A14 reference) did
+ * nothing in torch mode on this board, so the PMIC flash is left as firmware set it.
+ */
+
+&tlmm {
+	cam_ir_default: cam-ir-default-state {
+		mclk-pins {
+			pins = "gpio96";
+			function = "cam_mclk";
+			drive-strength = <16>;
+			bias-disable;
+		};
+
+		reset-n-pins {
+			pins = "gpio109";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
+
+&cci0 {
+	status = "okay";
+};
+
+&cci0_i2c0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera@10 {
+		compatible = "st,vd55g0";
+		reg = <0x10>;
+
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&tlmm 109 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_ir_default>;
+		pinctrl-names = "default";
+
+		VCORE-supply = <&vreg_l2m_1p2>;
+		VDDIO-supply = <&vreg_l4m_1p8>;
+		VANA-supply = <&vreg_l6m_1p8>;
+
+		st,leds = <1>;
+		orientation = <0>;
+
+		port {
+			cam_ir_ep: endpoint {
+				data-lanes = <1>;
+				link-frequencies = /bits/ 64 <402000000>;
+				remote-endpoint = <&camss_csiphy0_inep0>;
+			};
+		};
+	};
+};
+
+/* Disabled in the base DT. Windows powers every CSIPHY from L1C/L2C, the same rails as CSIPHY4. */
+&csiphy0 {
+	vdda-0p8-supply = <&vreg_l2c>;
+	vdda-1p2-supply = <&vreg_l1c>;
+	status = "okay";
+};
+
+&camss_csiphy0_inep0 {
+	clock-lanes = <7>;
+	data-lanes = <0>;
+	remote-endpoint = <&cam_ir_ep>;
+};

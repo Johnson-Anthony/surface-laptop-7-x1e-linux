@@ -1,0 +1,159 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Build the Surface Laptop 7 boot DTB for one kernel version (7.3 and later):
+#
+#   x1e80100-microsoft-romulus15.dtb             base, from the kernel package
+#     + dts/romulus15-ir-camera-rails.dtso       PM8010 L2M/L4M, only if the base has no ldo2
+#     + dts/romulus15-ir-camera.dtso             IR camera
+#     + dts/romulus15-deep-sleep.dtso            only if the base's domain_ss3 is not at 10 s
+#     = x1e80100-microsoft-romulus15-ir.dtb      boot DTB; /boot/dtb-<kver> points to it
+#
+# The packaged base is kept next to it, for a rescue boot entry. Both are built into
+# ${XDG_CACHE_HOME:-$HOME/.cache}/sl7-dtbs/<kver>/ and compared with the copies in
+# /boot/dtbs/<kver>/qcom/. Nothing under /boot changes unless you pass --install.
+# Run it again after editing an overlay or installing a new kernel.
+#
+# Usage: build-dtbs [--install] [--ksrc DIR] [--no-deep-sleep] [KVER]
+#   KVER             kernel release (default: the running kernel)
+#   --ksrc DIR       kernel source or headers tree with include/dt-bindings, for the
+#                    overlays' #includes (default: $KSRC, else /lib/modules/KVER/build)
+#   --no-deep-sleep  never apply romulus15-deep-sleep.dtso
+#   --install        (root) copy both DTBs to /boot/dtbs/KVER/qcom/ and point
+#                    /boot/dtb-KVER at the IR DTB
+# Environment: BASE=PATH builds on another base DTB; DTS_DIR=DIR reads the overlays
+# from another directory (default: the repo's dts/); BOOT=DIR installs into another
+# /boot (a mounted system).
+set -eu
+
+usage() { sed -n '/^# Usage:/,/^set -eu/{ /^set -eu/d; s/^# \{0,1\}//; p; }' "$0" >&2; exit 2; }
+
+install=no
+deep=auto
+ksrc=${KSRC:-}
+while [ $# -gt 0 ]; do
+	case $1 in
+	--install) install=yes ;;
+	--no-deep-sleep) deep=no ;;
+	--ksrc) [ $# -ge 2 ] || usage; ksrc=$2; shift ;;
+	--ksrc=*) ksrc=${1#--ksrc=} ;;
+	-h|--help) usage ;;
+	-*) echo "unknown option $1" >&2; usage ;;
+	*) break ;;
+	esac
+	shift
+done
+[ $# -le 1 ] || usage
+kver=${1:-$(uname -r)}
+
+for c in cpp dtc fdtoverlay fdtget cmp; do
+	command -v "$c" >/dev/null || { echo "$c not found (cpp: package cpp; the rest: device-tree-compiler)" >&2; exit 1; }
+done
+if [ $install = yes ] && [ "$(id -u)" -ne 0 ]; then
+	echo "--install needs root" >&2
+	exit 1
+fi
+
+here=$(cd "$(dirname "$0")" && pwd)
+dts=${DTS_DIR:-$here/../../dts}
+name=x1e80100-microsoft-romulus15
+boot=${BOOT:-/boot}
+qcom=$boot/dtbs/$kver/qcom
+out=${XDG_CACHE_HOME:-$HOME/.cache}/sl7-dtbs/$kver
+for f in romulus15-ir-camera-rails.dtso romulus15-ir-camera.dtso romulus15-deep-sleep.dtso; do
+	[ -f "$dts/$f" ] || { echo "missing overlay $dts/$f" >&2; exit 1; }
+done
+
+# Base DTB: Debian-style packages (make bindeb-pkg) install DTBs under
+# /usr/lib/linux-image-KVER, Ubuntu's under /lib/firmware/KVER/device-tree.
+base=${BASE:-}
+if [ -z "$base" ]; then
+	for d in /usr/lib/linux-image-$kver /lib/firmware/$kver/device-tree; do
+		[ -f "$d/qcom/$name.dtb" ] && { base=$d/qcom/$name.dtb; break; }
+	done
+fi
+if [ -z "$base" ] || [ ! -f "$base" ]; then
+	echo "no $name.dtb for $kver in /usr/lib/linux-image-$kver or /lib/firmware/$kver/device-tree (set BASE=)" >&2
+	exit 1
+fi
+
+# The IR overlays #include dt-bindings headers.
+if [ -z "$ksrc" ]; then
+	for d in /lib/modules/$kver/build /usr/src/linux-headers-$kver; do
+		[ -d "$d/include/dt-bindings" ] && { ksrc=$d; break; }
+	done
+fi
+if [ -z "$ksrc" ] || [ ! -d "$ksrc/include/dt-bindings" ]; then
+	echo "no include/dt-bindings for $kver: install its headers package or pass --ksrc DIR" >&2
+	exit 1
+fi
+
+dtbo() {
+	cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I "$ksrc/include" "$1" |
+		dtc -@ -q -I dts -O dtb -o "$2" -
+}
+
+mkdir -p "$out"
+echo "base: $base"
+cp "$base" "$out/$name.dtb"
+
+overlays=""
+if ! fdtget "$base" /soc@0/rsc@17500000/regulators-8/ldo2 regulator-name >/dev/null 2>&1; then
+	dtbo "$dts/romulus15-ir-camera-rails.dtso" "$out/romulus15-ir-camera-rails.dtbo"
+	overlays="$out/romulus15-ir-camera-rails.dtbo"
+fi
+dtbo "$dts/romulus15-ir-camera.dtso" "$out/romulus15-ir-camera.dtbo"
+overlays="$overlays $out/romulus15-ir-camera.dtbo"
+
+res=$(fdtget -t u "$base" /cpus/domain-idle-states/domain-sleep-0 min-residency-us 2>/dev/null) || res=""
+if [ -n "$res" ]; then have="min-residency $res us in the base"; else have="not in the base"; fi
+if [ "$res" = 10000000 ]; then
+	echo "domain_ss3: $have (10 s), nothing to add"
+elif [ $deep = no ]; then
+	echo "domain_ss3: $have, left as is (--no-deep-sleep)"
+else
+	echo "domain_ss3: $have, applying romulus15-deep-sleep.dtso"
+	dtbo "$dts/romulus15-deep-sleep.dtso" "$out/romulus15-deep-sleep.dtbo"
+	overlays="$overlays $out/romulus15-deep-sleep.dtbo"
+fi
+
+# shellcheck disable=SC2086 # $overlays is a list, in apply order
+fdtoverlay -i "$base" -o "$out/$name-ir.dtb" $overlays
+
+# Sanity: the result carries the IR sensor and its rails.
+fdtget "$out/$name-ir.dtb" /soc@0/cci@ac15000/i2c-bus@0/camera@10 compatible >/dev/null
+fdtget "$out/$name-ir.dtb" /soc@0/rsc@17500000/regulators-8/ldo4 regulator-name >/dev/null
+fdtget "$out/$name-ir.dtb" /psci/power-domain-system domain-idle-states >/dev/null 2>&1 ||
+	echo "note: no system idle state in the result (deep sleep can't reach CX collapse)"
+
+[ $install = yes ] && mkdir -p "$qcom"
+for dtb in "$name.dtb" "$name-ir.dtb"; do
+	if [ ! -f "$qcom/$dtb" ]; then
+		state="not installed"
+	elif cmp -s "$out/$dtb" "$qcom/$dtb"; then
+		state="same as installed"
+	else
+		state="DIFFERS from installed"
+	fi
+	echo "$dtb: $state"
+	if [ $install = yes ] && [ "$state" != "same as installed" ]; then
+		install -m 644 "$out/$dtb" "$qcom/$dtb"
+		echo "  installed $qcom/$dtb"
+	fi
+done
+
+# GRUB entries load /boot/dtb-KVER (a relative symlink, like /boot/dtb).
+link=$boot/dtb-$kver
+target=dtbs/$kver/qcom/$name-ir.dtb
+if [ -e "$link" ] && [ ! -L "$link" ]; then
+	echo "$link is a regular file, not a symlink (flash-kernel?); left alone"
+elif [ "$(readlink "$link" 2>/dev/null)" = "$target" ]; then
+	echo "$link -> $target"
+elif [ $install = yes ]; then
+	ln -sfn "$target" "$link"
+	echo "$link -> $target (updated)"
+else
+	echo "$link: $(readlink "$link" 2>/dev/null || echo missing), --install points it at $target"
+fi
+[ $install = yes ] || echo "built in $out (pass --install as root to copy to $qcom)"

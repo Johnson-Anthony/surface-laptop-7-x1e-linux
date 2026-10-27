@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-FileCopyrightText: 2026 Anthony Johnson
+/*
+ * Surface Laptop 7 (X1E80100): PM8010 L2M and L4M for the IR camera, for base
+ * DTBs that don't define them. Tested on a 13.8" (model 2036) booting the
+ * romulus15 DTB; see romulus15-ir-camera.dtso.
+ *
+ * The 7.3 x1e80100-microsoft-romulus15.dtb only has L1M/L3M/L5M (RGB camera).
+ * Older hand-made bases may already have ldo2/ldo4, so apply this only when the
+ * base has no ldo2 (tools/dtb/build-dtbs checks). Windows powers the IR sensor
+ * (CAMI, MSHW0472) from L2M at 1.2 V and L4M at 1.8 V.
+ * Apply before romulus15-ir-camera.dtso, which refers to both labels.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+
+&{/soc@0/rsc@17500000/regulators-8} {
+	vreg_l2m_1p2: ldo2 {
+		regulator-name = "vreg_l2m_1p2";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+	};
+
+	vreg_l4m_1p8: ldo4 {
+		regulator-name = "vreg_l4m_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+	};
+};

@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-FileCopyrightText: 2026 Anthony Johnson
+/*
+ * Surface Laptop 7 (romulus13/romulus15, X1E80100): the system-wide idle state
+ * domain_ss3, which lets the SoC reach CX collapse, AOSS sleep and DDR self-refresh
+ * (what Windows Modern Standby calls DRIPS). Tested on a 13.8" (model 2036) booting
+ * the romulus15 DTB.
+ *
+ * The values are upstream commit 95f827ceb21e ("arm64: dts: qcom: x1e80100: Add
+ * deepest idle state", v7.3), with one change: min-residency is 10 s instead of
+ * 9000 us.
+ *   - Kernels before 7.3 have no domain-sleep-0 node, so this adds it.
+ *   - 7.3 and later already have it in hamoa.dtsi, so this only raises the
+ *     residency. The 7.3.0-sl7 kernel from this repo already has 10 s (patch 0004);
+ *     applying this to its DTB changes nothing.
+ *
+ * Why 10 s: the genpd CPU governor picks the system state for suspend by latency
+ * only (cpu_system_power_down_ok), so suspend still uses it. Runtime cpuidle also
+ * needs the predicted idle time to cover the residency (cpu_power_down_ok), so it
+ * never enters the state while the laptop is in use. Other X1E laptops hung when
+ * the system state was entered at runtime. This laptop has not been run with the
+ * upstream 9000 us value.
+ *
+ * Wake from this state relies on the PDC routing GPIO wakeups (lid, keyboard). That
+ * series is in 7.3. Before 7.3, only interrupts that reach the PDC directly (the
+ * power key, through SPMI) wake the SoC.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&{/cpus/domain-idle-states} {
+	domain_ss3: domain-sleep-0 {
+		compatible = "domain-idle-state";
+		arm,psci-suspend-param = <0x0200c354>;
+		entry-latency-us = <2500>;
+		exit-latency-us = <2500>;
+		min-residency-us = <10000000>;
+	};
+};
+
+&{/psci/power-domain-system} {
+	domain-idle-states = <&domain_ss3>;
+};
