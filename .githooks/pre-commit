@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+# Blocks commits that carry personal data or non-redistributable files.
+exec "$(git rev-parse --show-toplevel)/tools/dev/scrub-check" --staged

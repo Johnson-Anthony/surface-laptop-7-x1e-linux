@@ -1,0 +1,42 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scrub check (generic rules)
+        run: tools/dev/scrub-check
+
+      - name: Licenses (REUSE)
+        uses: fsfe/reuse-action@v5
+
+      - name: Shell scripts
+        run: |
+          grep -rlE '^#!.*\b(ba|da)?sh\b' tools systemd config .githooks \
+            | xargs --no-run-if-empty shellcheck
+
+      - name: Python scripts
+        run: |
+          grep -rlE '^#!.*python' tools systemd config \
+            | xargs --no-run-if-empty -n1 python3 -m py_compile
+
+      - name: Kernel patch style
+        run: |
+          mkdir -p "$RUNNER_TEMP/cp"
+          for f in checkpatch.pl spelling.txt const_structs.checkpatch; do
+            curl -fsSLo "$RUNNER_TEMP/cp/$f" \
+              "https://raw.githubusercontent.com/torvalds/linux/v6.18/scripts/$f"
+          done
+          # Signed-off-by is added by the human submitter, not stored here
+          # (see patches/kernel-7.3/README.md).
+          perl "$RUNNER_TEMP/cp/checkpatch.pl" --no-tree --strict --ignore MISSING_SIGN_OFF \
+            patches/kernel-7.3/*.patch patches/kernel-7.3/build/*.patch

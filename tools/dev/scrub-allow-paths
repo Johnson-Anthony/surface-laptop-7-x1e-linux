@@ -1,0 +1,3 @@
+# Paths exempt from the text rules (the denylist and file-type rules still apply).
+# The checker names the patterns it looks for.
+tools/dev/scrub-check

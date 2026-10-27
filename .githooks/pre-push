@@ -1,0 +1,5 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+# Scans the whole history, commit metadata included, before anything leaves the machine.
+exec "$(git rev-parse --show-toplevel)/tools/dev/scrub-check" --history

@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+"""Refuse to publish personal data or files that must not be redistributed.
+
+  scrub-check              scan every tracked and untracked (non-ignored) file
+  scrub-check --staged     scan what is about to be committed (pre-commit hook)
+  scrub-check --history    scan every blob in the history (pre-push hook)
+  scrub-check PATH...      scan the given files
+
+Generic rules always run: MAC addresses, UUIDs, email addresses other than
+noreply ones, home-directory paths, private keys, VPN/homelab interface names,
+binary files, blocked file types and files over 1 MB.
+
+If ~/.config/sl7-scrub/denylist exists (one literal per line, # for comments),
+any of those strings is an error too. Keep that file OUT of the repo: it holds
+the real values.
+
+A line is exempt if it contains the marker  scrub:allow  (use sparingly, with a
+reason next to it). Paths listed in tools/dev/scrub-allow-paths are exempt from
+the text rules but not from the file-type and size rules.
+"""
+import os
+import re
+import subprocess
+import sys
+
+MAX_BYTES = 1_000_000
+BLOCKED_EXT = {
+    ".pem", ".key", ".p12", ".der", ".x509", ".ko", ".o", ".a", ".so",
+    ".dtb", ".dtbo", ".raw", ".pgm", ".ppm", ".png", ".jpg", ".jpeg",
+    ".mbn", ".elf", ".bin", ".inf", ".cat", ".sys", ".jsn", ".deb",
+    ".changes", ".buildinfo", ".dat", ".zst", ".xz", ".gz", ".tar",
+}
+EMAIL_OK = re.compile(
+    r"@(users\.noreply\.github\.com|anthropic\.com|example\.(com|org))$", re.I)
+RULES = [
+    ("mac-address", re.compile(r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b", re.I)),
+    ("uuid", re.compile(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)),
+    ("email", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+    ("home-path", re.compile(r"/home/[a-z_][a-z0-9_-]*")),
+    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("network-name", re.compile(r"\b(mullvad|homelab|wg[0-9][\w-]*)\b", re.I)),
+]
+# Zero/all-ones MACs and the nil UUID are fine.
+HARMLESS = {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff",
+            "00000000-0000-0000-0000-000000000000"}
+
+
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, check=True).stdout
+
+
+def load_denylist():
+    path = os.path.expanduser("~/.config/sl7-scrub/denylist")
+    try:
+        with open(path) as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        return []
+
+
+def load_allowed_paths(root):
+    try:
+        with open(os.path.join(root, "tools/dev/scrub-allow-paths")) as f:
+            return {l.strip() for l in f if l.strip() and not l.startswith("#")}
+    except OSError:
+        return set()
+
+
+def mask(s):
+    return s if len(s) <= 6 else s[:3] + "…" + s[-2:]
+
+
+def scan_blob(name, data, deny, allowed, problems):
+    ext = os.path.splitext(name)[1].lower()
+    if ext in BLOCKED_EXT:
+        problems.append(f"{name}: blocked file type {ext}")
+    if len(data) > MAX_BYTES:
+        problems.append(f"{name}: {len(data)} bytes (limit {MAX_BYTES})")
+    if b"\0" in data[:8192]:
+        problems.append(f"{name}: binary file")
+        return
+    text = data.decode("utf-8", "replace")
+    lower = text.lower()
+    for d in deny:
+        if d.lower() in lower:
+            problems.append(f"{name}: contains a denylisted value ({mask(d)})")
+    if name in allowed:
+        return
+    for n, line in enumerate(text.splitlines(), 1):
+        if "scrub:allow" in line:
+            continue
+        for rule, rx in RULES:
+            for m in rx.finditer(line):
+                hit = m.group(0)
+                if hit.lower() in HARMLESS:
+                    continue
+                if rule == "email" and EMAIL_OK.search(hit):
+                    continue
+                problems.append(f"{name}:{n}: {rule} ({mask(hit)})")
+
+
+def main(argv):
+    root = git("rev-parse", "--show-toplevel").decode().strip()
+    os.chdir(root)
+    deny = load_denylist()
+    allowed = load_allowed_paths(root)
+    problems = []
+
+    if argv[:1] == ["--staged"]:
+        names = git("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
+        for name in filter(None, names.decode().split("\0")):
+            scan_blob(name, git("show", f":{name}"), deny, allowed, problems)
+    elif argv[:1] == ["--history"]:
+        seen = set()
+        out = git("rev-list", "--all", "--objects").decode().splitlines()
+        for line in out:
+            sha, _, name = line.partition(" ")
+            if not name or sha in seen:
+                continue
+            if git("cat-file", "-t", sha).strip() != b"blob":
+                continue
+            seen.add(sha)
+            scan_blob(name, git("cat-file", "blob", sha), deny, allowed, problems)
+        # Commit messages and author/committer identities.
+        log = git("log", "--all", "--format=%H%n%an <%ae>%n%cn <%ce>%n%B").decode()
+        scan_blob("(commit metadata)", log.encode(), deny, set(), problems)
+    else:
+        if argv:
+            names = argv
+        else:
+            names = git("ls-files", "-z", "--cached", "--others",
+                        "--exclude-standard").decode().split("\0")
+        for name in filter(None, names):
+            if os.path.isfile(name):
+                with open(name, "rb") as f:
+                    scan_blob(name, f.read(), deny, allowed, problems)
+
+    if problems:
+        print("scrub-check: refusing, fix these first:", file=sys.stderr)
+        for p in problems:
+            print("  " + p, file=sys.stderr)
+        return 1
+    if not deny:
+        print("scrub-check: ok (generic rules only; no local denylist)")
+    else:
+        print(f"scrub-check: ok ({len(deny)} denylisted values checked)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
