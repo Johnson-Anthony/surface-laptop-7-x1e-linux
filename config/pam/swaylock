@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# PAM configuration for the swaylock screen locker, with face unlock (Howdy with
+# the IR camera) tried before the password. See docs/face-unlock.md.
+#
+# Install as /etc/pam.d/swaylock. On Debian this file is a dpkg conffile, so keep
+# a copy of the original and keep the local version when an upgrade asks.
+# The stock file is just "auth include login".
+#
+# On the lock screen, press Enter with an empty password and look at the screen.
+# If no face matches before Howdy's timeout, type the password as usual.
+# swaylock runs as the locked user, so that user must be able to open the camera
+# (group "video") and read /etc/howdy and its models.
+auth sufficient /usr/local/lib/security/pam_howdy.so
+auth include login

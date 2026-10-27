@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 20:32:59 +0000
+Subject: [PATCH 2/3] recorders: make camss_ir release() idempotent
+
+release() runs from atexit and again from VideoCapture.__del__ during interpreter
+shutdown, where starting v4l2-ctl fails with an ignored exception. Only act on
+the first call.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ howdy/src/recorders/camss_ir_reader.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/howdy/src/recorders/camss_ir_reader.py b/howdy/src/recorders/camss_ir_reader.py
+index c8fd004..172526e 100644
+--- a/howdy/src/recorders/camss_ir_reader.py
++++ b/howdy/src/recorders/camss_ir_reader.py
+@@ -39,6 +39,7 @@ class camss_ir_reader:
+ 		self.proc = None
+ 		self.subdev = None
+ 		self.restarted = False
++		self.released = False
+ 		atexit.register(self.release)
+ 		self._setup()
+ 		self._start()
+@@ -122,6 +123,11 @@ class camss_ir_reader:
+ 		pass
+ 
+ 	def release(self):
++		# Runs from atexit and again from VideoCapture.__del__ at interpreter shutdown,
++		# when subprocess can no longer start programs, so only act the first time
++		if self.released:
++			return
++		self.released = True
+ 		self._stop()
+ 		if self.subdev:
+ 			subprocess.run(["v4l2-ctl", "-d", self.subdev, "-c", "led_mode=0", "-c", "auto_exposure=0"],

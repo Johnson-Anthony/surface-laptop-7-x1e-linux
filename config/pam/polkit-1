@@ -1,0 +1,23 @@
+#%PAM-1.0
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Face unlock for polkit prompts (Howdy with the IR camera), for example the
+# Bitwarden desktop "unlock with system authentication". See docs/face-unlock.md.
+#
+# Install as /etc/pam.d/polkit-1. A file there overrides the vendor copy in
+# /usr/lib/pam.d/polkit-1 as a whole, so this is the Debian vendor file plus the
+# pam_howdy line. Compare it with your /usr/lib/pam.d/polkit-1 first and keep any
+# other differences. Delete /etc/pam.d/polkit-1 to go back to the vendor config.
+#
+# "sufficient": a recognised face ends the auth stack. If Howdy fails, times out
+# or the user has no face model, PAM falls through to the password prompt.
+# The path is where meson installs pam_howdy.so with -Dpam_dir=/usr/local/lib/security.
+auth       sufficient   /usr/local/lib/security/pam_howdy.so
+
+@include common-auth
+@include common-account
+@include common-password
+session       required   pam_env.so readenv=1 user_readenv=0
+session       required   pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
+@include common-session-noninteractive

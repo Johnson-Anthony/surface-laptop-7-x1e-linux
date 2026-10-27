@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 01:01:11 +0000
+Subject: [PATCH] vd55g0: Surface Laptop 7 power sequence and optional firmware
+  patch file
+
+Changes needed, or useful, to run the IR camera of the Microsoft Surface
+Laptop 7 (X1E80100, ACPI subsystem ID MSHW0472) with this driver.
+
+- Power the rails in the order the Windows driver uses on this board:
+  VDDIO, VCORE, 1 ms, VANA, 1 ms, then the clock and the reset pulse.
+  Power off in reverse, waiting 50 ms after VANA drops.
+  regulator_bulk_enable() enables the supplies asynchronously, so it gives
+  no ordering.
+
+- Assert reset before the clock and the rails go away, in power_off and on
+  the power_on error path. Before, the line stayed deasserted after the
+  first power-up, so the active-low reset pin was driven high into an
+  unpowered sensor.
+
+- Log the silicon revision at info level (0x1111 is cut 1, 0x1120 is
+  cut 2) and no longer refuse an unknown revision: such a sensor gets the
+  firmware file below instead of the built-in patch.
+
+- Add a fw_patch module parameter. When it is set, or the revision is
+  unknown, the driver loads vd55g0-surface.bin with request_firmware() and
+  writes it in place of ST's built-in patch. The version that patch should
+  report is unknown, so the read-back version is only logged.
+
+Tested on a Surface Laptop 7 13.8" (X1E80100) with 7.0.0-rc4 and 7.3.0
+kernels: cut-1 sensor, ST's built-in cut-1 patch, 644x604 GREY frames at
+about 29.6 fps through Qualcomm CAMSS. The fw_patch path is untested.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+Not part of the commit message (git am drops everything from here to the
+diff):
+
+Base: https://github.com/STMicroelectronics/vd55g0-linux-driver at
+a05627b0f6d8 ("ci: Run package job on docker image too"). Apply it in a
+clone of that repository with `git am`, or with `patch -p1`.
+
+Build against the kernel you will run. KSRC is that kernel's build
+directory: /lib/modules/<kver>/build from a headers package, or a built
+kernel tree. Here it was the 7.3.0-sl7 tree.
+
+  make -C "$KSRC" M="$PWD" modules
+
+If the kernel enforces module signatures (CONFIG_MODULE_SIG_FORCE, or
+lockdown under Secure Boot), sign the module with a key the kernel trusts.
+For a self-built kernel that is the tree's own build key:
+
+  "$KSRC"/scripts/sign-file sha512 "$KSRC"/certs/signing_key.pem \
+      "$KSRC"/certs/signing_key.x509 vd55g0.ko
+
+Without enforcement an unsigned module still loads, with an "E" taint.
+Install it under updates/, which takes precedence over the kernel package,
+and rebuild the module index:
+
+  sudo install -D -m 644 vd55g0.ko /lib/modules/<kver>/updates/vd55g0.ko
+  sudo depmod -a <kver>
+
+Repeat for every new kernel. vd55g0-surface.bin is optional and is not
+distributed: a cut-1 or cut-2 sensor works with ST's built-in patch. See
+docs/ir-camera.md in the surface-laptop-7-x1e-linux repository.
+
+ vd55g0.c | 116 +++++++++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 104 insertions(+), 12 deletions(-)
+
+ vd55g0.c | 116 +++++++++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 104 insertions(+), 12 deletions(-)
+
+diff --git a/vd55g0.c b/vd55g0.c
+index c9b2711..26dbe34 100644
+--- a/vd55g0.c
++++ b/vd55g0.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/clk.h>
+ #include <linux/delay.h>
++#include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/iopoll.h>
+@@ -145,6 +146,13 @@
+ 
+ #include "vd55g0_patches.h"
+ 
++/* Patch extracted from the Surface Laptop 7 Windows driver */
++#define VD55G0_FW_PATCH					"vd55g0-surface.bin"
++
++static bool fw_patch;
++module_param(fw_patch, bool, 0444);
++MODULE_PARM_DESC(fw_patch, "Load " VD55G0_FW_PATCH " instead of the built-in patch");
++
+ static const char * const vd55g0_test_pattern_menu[] = {
+ 	"Disabled",
+ 	"Solid",
+@@ -565,6 +573,44 @@ static int vd55g0_get_regulators(struct vd55g0_dev *sensor)
+ 				       sensor->supplies);
+ }
+ 
++/*
++ * Power up in the order the Surface Laptop 7 Windows driver uses:
++ * VDDIO, VCORE, 1 ms, VANA, 1 ms. Indexes follow vd55g0_supply_name.
++ */
++static const int vd55g0_supply_order[] = { 1, 0, 2 };
++
++static int vd55g0_enable_supplies(struct vd55g0_dev *sensor)
++{
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(vd55g0_supply_order); i++) {
++		ret = regulator_enable(sensor->supplies[vd55g0_supply_order[i]].consumer);
++		if (ret)
++			goto disable;
++		if (i > 0)
++			usleep_range(1000, 2000);
++	}
++
++	return 0;
++
++disable:
++	while (--i >= 0)
++		regulator_disable(sensor->supplies[vd55g0_supply_order[i]].consumer);
++
++	return ret;
++}
++
++static void vd55g0_disable_supplies(struct vd55g0_dev *sensor)
++{
++	int i;
++
++	for (i = ARRAY_SIZE(vd55g0_supply_order) - 1; i >= 0; i--) {
++		regulator_disable(sensor->supplies[vd55g0_supply_order[i]].consumer);
++		if (i == ARRAY_SIZE(vd55g0_supply_order) - 1)
++			msleep(50);
++	}
++}
++
+ static int vd55g0_apply_patgen(struct vd55g0_dev *sensor)
+ {
+ 	static const u8 index2val[] = {
+@@ -1130,12 +1176,55 @@ error_ep:
+ 	return -EINVAL;
+ }
+ 
++/*
++ * Load the patch shipped with the Windows driver instead of the built-in one.
++ * Its expected version is unknown, so the read-back version is only logged.
++ */
++static int vd55g0_patch_from_fw(struct vd55g0_dev *sensor)
++{
++	struct i2c_client *client = sensor->i2c_client;
++	const struct firmware *fw;
++	int patch_version, ret;
++
++	ret = request_firmware(&fw, VD55G0_FW_PATCH, &client->dev);
++	if (ret)
++		return ret;
++
++	ret = vd55g0_write_array(sensor, VD55G0_REG_FWPATCH_START_ADDR,
++				 fw->size, fw->data);
++	release_firmware(fw);
++	if (ret)
++		return ret;
++
++	ret = vd55g0_write_reg(sensor, VD55G0_REG_BOOT,
++			       VD55G0_BOOT_PATCH_SETUP, NULL);
++	if (ret)
++		return ret;
++
++	ret = vd55g0_poll_reg(sensor, VD55G0_REG_BOOT, 0, VD55G0_TIMEOUT_MS);
++	if (ret)
++		return ret;
++
++	patch_version = vd55g0_read_reg(sensor, VD55G0_REG_FWPATCH_REVISION);
++	if (patch_version < 0)
++		return patch_version;
++
++	dev_info(&client->dev, "%s applied, patch version %d.%d\n",
++		 VD55G0_FW_PATCH, patch_version >> 8, patch_version & 0xff);
++
++	return 0;
++}
++
+ static int vd55g0_patch(struct vd55g0_dev *sensor)
+ {
+ 	struct i2c_client *client = sensor->i2c_client;
+ 	struct vd55g0_patch *patch;
+ 	int patch_version, ret;
+ 
++	if (fw_patch || (sensor->revision != VD55G0_REVISION_CUT1 &&
++			 sensor->revision != VD55G0_REVISION_CUT2))
++		return vd55g0_patch_from_fw(sensor);
++
+ 	/* Choose appropriate patch for sensor revision */
+ 	if (sensor->revision == VD55G0_REVISION_CUT1)
+ 		patch = &vd55g0_patch_cut1;
+@@ -1731,16 +1820,14 @@ static int vd55g0_detect(struct vd55g0_dev *sensor)
+ 	}
+ 
+ 	revision = vd55g0_read_reg(sensor, VD55G0_REG_REVISION);
+-	dev_dbg(&client->dev, "Sensor revision 0x%x", revision);
+ 	if (revision < 0)
+ 		return revision;
+ 
++	dev_info(&client->dev, "Sensor revision 0x%x\n", revision);
+ 	if (revision != VD55G0_REVISION_CUT1 &&
+-	    revision != VD55G0_REVISION_CUT2) {
+-		dev_err(&client->dev, "Unsupported device revision 0x%x\n",
+-			revision);
+-		return -ENODEV;
+-	}
++	    revision != VD55G0_REVISION_CUT2)
++		dev_warn(&client->dev, "Unknown revision 0x%x, will use %s\n",
++			 revision, VD55G0_FW_PATCH);
+ 
+ 	sensor->revision = revision;
+ 
+@@ -1755,12 +1842,12 @@ static int vd55g0_power_on(struct device *dev)
+ 	struct vd55g0_dev *sensor = to_vd55g0_dev(sd);
+ 	int ret;
+ 
+-	ret = regulator_bulk_enable(ARRAY_SIZE(vd55g0_supply_name),
+-				    sensor->supplies);
++	ret = vd55g0_enable_supplies(sensor);
+ 	if (ret) {
+ 		dev_err(&client->dev, "failed to enable regulators %d", ret);
+ 		return ret;
+ 	}
++	usleep_range(1000, 2000);
+ 
+ 	ret = clk_prepare_enable(sensor->xclk);
+ 	if (ret) {
+@@ -1807,8 +1894,9 @@ static int vd55g0_power_on(struct device *dev)
+ disable_clock:
+ 	clk_disable_unprepare(sensor->xclk);
+ disable_bulk:
+-	regulator_bulk_disable(ARRAY_SIZE(vd55g0_supply_name),
+-			       sensor->supplies);
++	if (sensor->reset_gpio)
++		gpiod_set_value_cansleep(sensor->reset_gpio, 1);
++	vd55g0_disable_supplies(sensor);
+ 
+ 	return ret;
+ }
+@@ -1819,9 +1907,12 @@ static int vd55g0_power_off(struct device *dev)
+ 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+ 	struct vd55g0_dev *sensor = to_vd55g0_dev(sd);
+ 
++	if (sensor->reset_gpio) {
++		gpiod_set_value_cansleep(sensor->reset_gpio, 1);
++		usleep_range(5000, 6000);
++	}
+ 	clk_disable_unprepare(sensor->xclk);
+-	regulator_bulk_disable(ARRAY_SIZE(vd55g0_supply_name),
+-			       sensor->supplies);
++	vd55g0_disable_supplies(sensor);
+ 	return 0;
+ }
+ 
+@@ -2111,4 +2202,5 @@ MODULE_AUTHOR("Benjamin Mugnier <benjamin.mugnier@foss.st.com>");
+ MODULE_AUTHOR("Mickael Guene <mickael.guene@st.com>");
+ MODULE_AUTHOR("Sylvain Petinot <sylvain.petinot@foss.st.com>");
+ MODULE_DESCRIPTION("VD55G0 camera subdev driver");
++MODULE_FIRMWARE(VD55G0_FW_PATCH);
+ MODULE_LICENSE("GPL v2");

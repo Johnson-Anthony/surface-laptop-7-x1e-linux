@@ -1,0 +1,199 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Check the Surface Laptop 7 IR camera (ST VD55G0 behind Qualcomm CAMSS) and
+# capture a short burst of raw frames from it. See docs/ir-camera.md.
+
+set -u
+
+usage() {
+	cat <<'EOF'
+Usage: check-ir [--no-frames] [-h|--help]
+
+Checks the IR camera (device tree node, driver, rails, media graph), then
+captures 30 GREY 644x604 frames through csiphy0 -> csid1 -> vfe1_rdi0 and
+reports the frame rate and the brightness of the last frame. The IR flood LED
+stays off: the sensor strobe (led_mode) is set to 0 before the capture.
+
+Results go to ${XDG_STATE_HOME:-$HOME/.local/state}/sl7/ir-test/<time>/:
+  summary.txt     everything printed on the terminal
+  dmesg.txt       the full kernel log (reading it may need sudo)
+  media-ctl.txt   the CAMSS media graph
+  fmt.txt, stream.txt  video format and the v4l2-ctl capture log
+  ir-grey.raw     the raw frames            (not with --no-frames)
+  ir-frame-last.pgm  the last frame as PGM  (not with --no-frames)
+
+The camera faces you, so saved frames show your face and the room.
+Use --no-frames to measure without keeping any image: frames are then only
+read from a pipe to compute the statistics and are never written to disk.
+Don't publish the output directory without looking through it.
+
+Options:
+  --no-frames   don't save any frames
+  -h, --help    show this help
+EOF
+}
+
+save_frames=yes
+for arg in "$@"; do
+	case $arg in
+	--no-frames) save_frames=no ;;
+	-h | --help) usage; exit 0 ;;
+	*) usage >&2; exit 2 ;;
+	esac
+done
+
+W=644 H=604 COUNT=30
+FMT=Y8_1X8/${W}x${H}
+# Fixed by the board wiring (CSIPHY0); CSID1 and VFE1 are free on this machine.
+PHY=msm_csiphy0 CSID=msm_csid1 RDI=msm_vfe1_rdi0 VIDEO=msm_vfe1_video0
+
+OUT=${XDG_STATE_HOME:-$HOME/.local/state}/sl7/ir-test/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$OUT" || exit 1
+chmod 700 "$OUT"
+exec > >(tee "$OUT/summary.txt") 2>&1
+
+klog() {
+	local log
+	dmesg 2>/dev/null && return
+	log=$(journalctl -k -b 0 --no-pager -q 2>/dev/null)
+	[ -n "$log" ] && { printf '%s\n' "$log"; return; }
+	echo "(the kernel log is restricted; asking sudo for dmesg)" >&2
+	sudo dmesg
+}
+
+echo "== boot"
+uname -r
+node=
+for c in /proc/device-tree/soc@0/cci@*/i2c-bus@*/camera@*/compatible; do
+	[ -e "$c" ] || continue
+	if [ "$(tr -d '\0' <"$c")" = st,vd55g0 ]; then
+		node=${c%/compatible}
+	fi
+done
+if [ -z "$node" ]; then
+	echo "No st,vd55g0 node in the running device tree: boot a DTB with"
+	echo "dts/romulus15-ir-camera.dtso applied. Stopping."
+	exit 1
+fi
+echo "DT node: ${node#/proc/device-tree}"
+cci=${node%/i2c-bus@*}
+echo "CCI status: $(tr -d '\0' <"$cci/status" 2>/dev/null)"
+
+echo "== kernel log"
+klog >"$OUT/dmesg.txt"
+grep -iE 'vd55g0|cci|camss|csiphy|vreg_l[246]m|-0010' "$OUT/dmesg.txt" | tail -40
+
+echo "== modules"
+lsmod | grep -E '^(vd55g0|qcom_camss|i2c_qcom_cci|ov02c10) ' || echo "none of vd55g0, qcom_camss, i2c_qcom_cci loaded"
+modinfo -F filename vd55g0 2>/dev/null | sed 's/^/vd55g0 module: /'
+
+echo "== i2c address 0x10"
+found=no
+for d in /sys/bus/i2c/devices/*-0010; do
+	[ -e "$d" ] || continue
+	found=yes
+	drv=$(readlink "$d/driver" 2>/dev/null)
+	echo "$(basename "$d") name=$(cat "$d/name") driver=${drv##*/}"
+done
+[ $found = yes ] || echo "no i2c client at 0x10"
+
+echo "== regulators (disabled while the sensor is idle; runtime PM powers it per stream)"
+for r in /sys/class/regulator/regulator.*; do
+	n=$(cat "$r/name" 2>/dev/null)
+	case $n in vreg_l2m_1p2 | vreg_l4m_1p8 | vreg_l6m_1p8)
+		echo "$n state=$(cat "$r/state" 2>/dev/null) uV=$(cat "$r/microvolts" 2>/dev/null)" ;;
+	esac
+done
+
+echo "== media graph"
+MEDIA=
+for m in /dev/media*; do
+	[ -e "$m" ] || continue
+	if media-ctl -d "$m" -p 2>/dev/null | grep -qE '^driver +qcom-camss$'; then
+		MEDIA=$m
+		break
+	fi
+done
+if [ -z "$MEDIA" ]; then
+	echo "No qcom-camss media device. Is qcom_camss loaded?"
+	exit 1
+fi
+echo "CAMSS media device: $MEDIA"
+media-ctl -d "$MEDIA" -p >"$OUT/media-ctl.txt" 2>&1
+grep -E '^- entity' "$OUT/media-ctl.txt" | grep -vE 'vfe[0-9]+_(rdi|pix|video)|tpg[0-9]'
+SENSOR=$(sed -n 's/^- entity [0-9]*: \(vd55g0 [^ ]*\) .*/\1/p' "$OUT/media-ctl.txt" | head -1)
+echo "sensor entity: ${SENSOR:-none}"
+
+if command -v cam >/dev/null; then
+	echo "== libcamera"
+	cam -l 2>/dev/null | sed -n '/^Available cameras/,$p'
+fi
+
+if [ -z "$SENSOR" ]; then
+	echo "Sensor not in the media graph, skipping the capture."
+	exit 1
+fi
+
+echo "== capture: $SENSOR -> $PHY -> $CSID -> $RDI, GREY ${W}x${H}, $COUNT frames, IR LED off"
+SUBDEV=$(media-ctl -d "$MEDIA" -e "$SENSOR")
+v4l2-ctl -d "$SUBDEV" -c led_mode=0 || exit 1
+# CAMSS enables csiphy0 -> csid0 at boot, and a CSIPHY output drives only one CSID:
+# linking csid1 without dropping that link gives EBUSY, then EPIPE on STREAMON.
+media-ctl -d "$MEDIA" -l "\"$PHY\":1->\"msm_csid0\":0[0]" || exit 1
+media-ctl -d "$MEDIA" -l "\"$PHY\":1->\"$CSID\":0[1]" || exit 1
+media-ctl -d "$MEDIA" -l "\"$CSID\":1->\"$RDI\":0[1]" || exit 1
+for pad in "\"$SENSOR\":0" "\"$PHY\":0" "\"$CSID\":0" "\"$RDI\":0"; do
+	media-ctl -d "$MEDIA" -V "${pad}[fmt:$FMT field:none]" || exit 1
+done
+VID=$(media-ctl -d "$MEDIA" -e "$VIDEO")
+v4l2-ctl -d "$VID" --set-fmt-video=width=$W,height=$H,pixelformat=GREY || exit 1
+v4l2-ctl -d "$VID" --get-fmt-video | tee "$OUT/fmt.txt"
+BPL=$(sed -n 's/.*Bytes per Line *: *\([0-9]*\).*/\1/p' "$OUT/fmt.txt")
+
+save=
+[ $save_frames = yes ] && save=$OUT
+# Frames go through a pipe; the statistics script writes files only when asked to.
+read -r -d '' STATS <<'EOF'
+import sys
+w, h, bpl, out = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+size = bpl * h
+raw = open(out + '/ir-grey.raw', 'wb') if out else None
+n, last = 0, None
+while True:
+    buf = sys.stdin.buffer.read(size)
+    if len(buf) < size:
+        break
+    n, last = n + 1, buf
+    if raw:
+        raw.write(buf)
+if raw:
+    raw.close()
+if not n:
+    sys.exit('no complete %dx%d frame received' % (bpl, h))
+img = b''.join(last[y * bpl:y * bpl + w] for y in range(h))
+print('frames=%d, last frame mean=%.1f min=%d max=%d' % (n, sum(img) / len(img), min(img), max(img)))
+if out:
+    with open(out + '/ir-frame-last.pgm', 'wb') as f:
+        f.write(b'P5\n%d %d\n255\n' % (w, h) + img)
+EOF
+# A stream sometimes stalls after zero to a few frames, with nothing in the kernel
+# log. Starting it again has always recovered it, so try twice, as Howdy's reader does.
+for attempt in 1 2; do
+	timeout 10 v4l2-ctl -d "$VID" --stream-mmap --stream-count=$COUNT --stream-to=- --verbose \
+		2>"$OUT/stream.txt" | python3 -I -c "$STATS" $W $H "${BPL:-$W}" "$save"
+	rc=("${PIPESTATUS[@]}")
+	[ "${rc[0]}" = 124 ] || break
+	echo "attempt $attempt: the stream stalled after $(grep -c 'cap dqbuf' "$OUT/stream.txt") frames"
+	sleep 1
+done
+grep -o 'fps: [0-9.]*' "$OUT/stream.txt" | tail -1
+grep -E 'returned -1' "$OUT/stream.txt" | sort -u
+if [ $save_frames = yes ]; then
+	echo "Frames saved in $OUT (they may show your face)."
+else
+	echo "No frames saved (--no-frames)."
+fi
+echo "Logs in $OUT"
+[ "${rc[0]}" = 0 ] && [ "${rc[1]}" = 0 ]

@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 20:27:37 +0000
+Subject: [PATCH 1/3] recorders: add camss_ir reader for the Surface Laptop 7
+ IR camera
+
+The ST VD55G0 IR sensor sits behind Qualcomm CAMSS, whose raw video node needs
+media links and formats configured before streaming, and its IR flood LED is fired
+by the sensor's own strobe output (V4L2 control led_mode). Stream GREY frames
+through v4l2-ctl with manual exposure, restart once on a stalled stream, and stop
+the stream (and so the strobe) if the Howdy process dies.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ howdy/src/meson.build                  |   1 +
+ howdy/src/recorders/camss_ir_reader.py | 128 +++++++++++++++++++++++++
+ howdy/src/recorders/video_capture.py   |   7 ++
+ 3 files changed, 136 insertions(+)
+ create mode 100644 howdy/src/recorders/camss_ir_reader.py
+
+diff --git a/howdy/src/meson.build b/howdy/src/meson.build
+index 36dc05e..09c87e4 100644
+--- a/howdy/src/meson.build
++++ b/howdy/src/meson.build
+@@ -32,6 +32,7 @@ py_sources = [
+     'i18n.py',
+     'paths_factory.py',
+     'recorders/__init__.py',
++    'recorders/camss_ir_reader.py',
+     'recorders/ffmpeg_reader.py',
+     'recorders/pyv4l2_reader.py',
+     'recorders/v4l2.py',
+diff --git a/howdy/src/recorders/camss_ir_reader.py b/howdy/src/recorders/camss_ir_reader.py
+new file mode 100644
+index 0000000..c8fd004
+--- /dev/null
++++ b/howdy/src/recorders/camss_ir_reader.py
+@@ -0,0 +1,128 @@
++# Frame reader for the Surface Laptop 7 IR camera (ST VD55G0 behind Qualcomm CAMSS).
++# The raw CAMSS video node needs its media links and formats set before streaming, and
++# the IR flood LED is fired by the sensor's own strobe output (V4L2 control led_mode),
++# so frames are streamed through v4l2-ctl instead of OpenCV's V4L2 backend.
++
++import atexit
++import ctypes
++import os
++import select
++import signal
++import subprocess
++import time
++
++import numpy as np
++
++SENSOR = "vd55g0 8-0010"
++VIDEO = "msm_vfe1_video0"
++WIDTH = 644
++HEIGHT = 604
++LINKS = [
++	'"msm_csiphy0":1->"msm_csid0":0[0]',
++	'"msm_csiphy0":1->"msm_csid1":0[1]',
++	'"msm_csid1":1->"msm_vfe1_rdi0":0[1]',
++]
++PADS = ['"%s":0' % SENSOR, '"msm_csiphy0":0', '"msm_csid1":0', '"msm_vfe1_rdi0":0']
++
++
++def _die_with_parent():
++	"""Stop v4l2-ctl, and with it the strobe, if the Howdy process is killed"""
++	ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
++
++
++class camss_ir_reader:
++	def __init__(self, media_device, exposure=600, gain=8, frame_timeout=1.5):
++		self.media = media_device
++		self.exposure = exposure
++		self.gain = gain
++		self.frame_timeout = frame_timeout
++		self.proc = None
++		self.subdev = None
++		self.restarted = False
++		atexit.register(self.release)
++		self._setup()
++		self._start()
++
++	def _run(self, *args):
++		return subprocess.run(args, check=True, capture_output=True, text=True).stdout
++
++	def _setup(self):
++		for link in LINKS:
++			self._run("media-ctl", "-d", self.media, "-l", link)
++		for pad in PADS:
++			self._run("media-ctl", "-d", self.media, "-V",
++				"%s[fmt:Y8_1X8/%dx%d field:none]" % (pad, WIDTH, HEIGHT))
++
++		self.video = self._run("media-ctl", "-d", self.media, "-e", VIDEO).strip()
++		self.subdev = self._run("media-ctl", "-d", self.media, "-e", SENSOR).strip()
++
++		self._run("v4l2-ctl", "-d", self.video,
++			"--set-fmt-video=width=%d,height=%d,pixelformat=GREY" % (WIDTH, HEIGHT))
++		fmt = self._run("v4l2-ctl", "-d", self.video, "--get-fmt-video")
++		self.bpl = WIDTH
++		for line in fmt.splitlines():
++			if "Bytes per Line" in line:
++				self.bpl = int(line.split(":")[1])
++		self.frame_size = self.bpl * HEIGHT
++
++		# Manual exposure keeps the background dark so the strobe-lit face dominates
++		self._run("v4l2-ctl", "-d", self.subdev, "-c", "auto_exposure=1",
++			"-c", "exposure=%d" % self.exposure, "-c", "analogue_gain=%d" % self.gain,
++			"-c", "led_mode=1")
++
++	def _start(self):
++		self.proc = subprocess.Popen(
++			["v4l2-ctl", "-d", self.video, "--stream-mmap", "--stream-count=0", "--stream-to=-"],
++			stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent)
++
++	def _stop(self):
++		if self.proc is None:
++			return
++		self.proc.terminate()
++		try:
++			self.proc.wait(timeout=2)
++		except subprocess.TimeoutExpired:
++			self.proc.kill()
++			self.proc.wait()
++		self.proc = None
++
++	def _read_exact(self, size):
++		fd = self.proc.stdout.fileno()
++		buf = bytearray()
++		deadline = time.monotonic() + self.frame_timeout
++		while len(buf) < size:
++			remaining = deadline - time.monotonic()
++			if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
++				return None
++			chunk = os.read(fd, size - len(buf))
++			if not chunk:
++				return None
++			buf += chunk
++		return bytes(buf)
++
++	def read(self):
++		data = self._read_exact(self.frame_size)
++		# CAMSS sometimes stalls on a stream started right after another one
++		if data is None and not self.restarted:
++			self.restarted = True
++			self._stop()
++			self._start()
++			data = self._read_exact(self.frame_size)
++		if data is None:
++			return False, None
++
++		gray = np.frombuffer(data, np.uint8).reshape(HEIGHT, self.bpl)[:, :WIDTH]
++		# Howdy converts frames with COLOR_BGR2GRAY, so hand it three channels
++		return True, np.repeat(gray[:, :, np.newaxis], 3, axis=2)
++
++	def grab(self):
++		self.read()
++
++	def set(self, prop, value):
++		pass
++
++	def release(self):
++		self._stop()
++		if self.subdev:
++			subprocess.run(["v4l2-ctl", "-d", self.subdev, "-c", "led_mode=0", "-c", "auto_exposure=0"],
++				stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+diff --git a/howdy/src/recorders/video_capture.py b/howdy/src/recorders/video_capture.py
+index 15888a5..23d9718 100644
+--- a/howdy/src/recorders/video_capture.py
++++ b/howdy/src/recorders/video_capture.py
+@@ -110,6 +110,13 @@ class VideoCapture:
+ 				self.config.get("video", "device_format", fallback="v4l2")
+ 			)
+ 
++		elif recording_plugin == "camss_ir":
++			from recorders.camss_ir_reader import camss_ir_reader
++			self.internal = camss_ir_reader(
++				self.config.get("video", "device_path"),
++				self.config.getint("video", "camss_exposure", fallback=600),
++				self.config.getint("video", "camss_gain", fallback=8)
++			)
+ 		elif recording_plugin == "pyv4l2":
+ 			# Set the capture source for pyv4l2
+ 			from recorders.pyv4l2_reader import pyv4l2_reader
