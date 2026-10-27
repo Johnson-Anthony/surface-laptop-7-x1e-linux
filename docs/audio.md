@@ -1,0 +1,179 @@
+# Audio
+
+Audio on the Surface Laptop 7 needs four things the kernel package does not bring: Microsoft's
+DSP firmware (in the initramfs), a topology file, UCM configuration, and on some installs a
+WirePlumber rule. With them, the speakers, headphones, headset mic and internal mics work.
+
+Status: set up 2026-09-11 on the 7.0 kernel (Debian 13 userspace, alsa-ucm-conf 1.2.14,
+WirePlumber 0.5.8). On 7.3.0-sl7 (checked 2026-10-27), both DSPs start from the initramfs,
+the card `X1E80100Romulus` registers, WirePlumber uses the HiFi profile with Headphones and
+Speaker sinks, and the codec is in `CLS_AB_LOHIFI` mode. The speakers on 7.3 have an open
+question (see [Speakers](#speakers)).
+
+| Piece | Installed at | Needed because |
+|---|---|---|
+| ADSP and CDSP firmware | `/lib/firmware/qcom/x1e80100/microsoft/Romulus/` | the sound card lives on the ADSP. Microsoft-signed, from Windows; not in linux-firmware |
+| [initramfs hook](../config/audio/initramfs-hook-qcom-romulus-firmware) | `/etc/initramfs-tools/hooks/qcom-romulus-firmware` | without the firmware in the initramfs, the ADSP never starts |
+| Topology | `/lib/firmware/qcom/x1e80100/X1E80100-Romulus-tplg.bin` | the audio graph for this card; in linux-firmware, but newer than Debian 13's package |
+| [UCM files](../config/audio/ucm2/) | `/usr/share/alsa/ucm2/` | alsa-ucm-conf before 1.2.15 has no profile for this machine; before 1.2.16 the headphones clip |
+| [WirePlumber rule](../config/audio/wireplumber/51-force-hifi-profile.conf) | `~/.config/wireplumber/wireplumber.conf.d/` | stops WirePlumber from restoring the "pro-audio" profile, which bypasses UCM |
+
+## 1. DSP firmware
+
+The device tree asks for these files (the remoteproc nodes' `firmware-name`):
+
+    qcom/x1e80100/microsoft/Romulus/qcadsp8380.mbn   ADSP (audio, battery manager)
+    qcom/x1e80100/microsoft/Romulus/adsp_dtbs.elf
+    qcom/x1e80100/microsoft/Romulus/qccdsp8380.mbn   CDSP (compute)
+    qcom/x1e80100/microsoft/Romulus/cdsp_dtbs.elf
+
+They are signed for Microsoft's hardware. The DSPs start only images signed for the device's
+vendor, which is why linux-firmware keeps per-vendor directories, so its generic
+`qcom/x1e80100/adsp.mbn` (for Qualcomm's reference boards) is not expected to work here (not
+tried). linux-firmware has no Microsoft directory for X1E80100 (checked October 2026). This
+repo does not ship the files. Get them from your own Windows install:
+
+- [qcom-firmware-extract](https://tracker.debian.org/pkg/qcom-firmware-extract) (Debian and
+  Ubuntu; script by Tobias Heider and contributors). Its device list includes "Microsoft
+  Surface Laptop 7 (13.8 inch | 15 inch)" and maps it to `x1e80100/microsoft/Romulus`. It
+  mounts the Windows partition read-only (BitLocker volumes through dislocker), takes the
+  files from the Windows driver store, and installs them under
+  `/lib/firmware/updates/qcom/x1e80100/microsoft/Romulus/`. See its
+  [man page](https://dyn.manpages.debian.org/testing/qcom-firmware-extract/qcom-firmware-extract.8).
+- By hand: mount the Windows partition read-only and search
+  `Windows/System32/DriverStore/FileRepository/` for `qcadsp8380.mbn` and the other three
+  names. Copy them to `/lib/firmware/qcom/x1e80100/microsoft/Romulus/`.
+
+### Why the firmware must be in the initramfs
+
+With `MODULES=most` (the Debian default), `qcom_q6v5_pas` probes from the initramfs, before
+the root file system is mounted. If the firmware isn't there, the ADSP and CDSP boots fail
+once with -2 (`ENOENT`) and are never retried. The ADSP stays offline, and the sound card
+never registers. The ADSP also hosts the battery manager service that `qcom_battmgr` uses.
+
+The hook [`initramfs-hook-qcom-romulus-firmware`](../config/audio/initramfs-hook-qcom-romulus-firmware)
+copies the four files into every initramfs:
+
+    sudo install -m 0755 config/audio/initramfs-hook-qcom-romulus-firmware \
+        /etc/initramfs-tools/hooks/qcom-romulus-firmware
+    sudo update-initramfs -u -k all
+    lsinitramfs /boot/initrd.img-$(uname -r) | grep Romulus    # expect the four files
+
+It reads the file names from the running device tree, falling back to the names above. It
+finds the files under `/lib/firmware/updates/` (where qcom-firmware-extract puts them) as well
+as `/lib/firmware/`, compressed or not. A missing file gives a warning, not a failed build.
+
+To start the ADSP by hand without rebooting (a quick test after copying the firmware; check
+that `remoteproc0/name` says `adsp`):
+
+    echo start | sudo tee /sys/class/remoteproc/remoteproc0/state
+
+Check with `cat /sys/class/remoteproc/remoteproc*/name /sys/class/remoteproc/remoteproc*/state`:
+expect `adsp` and `cdsp`, both `running`.
+
+The hook needs re-running only when you change the firmware. Kernel updates rebuild the
+initramfs and run it automatically. It is in use on both the 7.0 and the 7.3 kernel here.
+
+## 2. Topology
+
+The ADSP's AudioReach driver (`q6apm`) loads `qcom/<driver name>/<card name>-tplg.bin`, which is
+`qcom/x1e80100/X1E80100-Romulus-tplg.bin` here. It is not Microsoft firmware. It comes from
+[linux-firmware](https://gitlab.com/kernel-firmware/linux-firmware/-/blob/main/qcom/x1e80100/X1E80100-Romulus-tplg.bin),
+but Debian 13's `firmware-qcom-soc` (20250410) is too old to have it. Install a newer
+linux-firmware package, or copy that one file to `/lib/firmware/qcom/x1e80100/`. This machine
+uses a copy taken from linux-firmware by hand.
+
+## 3. UCM
+
+The UCM profile tells PipeWire which mixer controls make up "Speaker", "Headphones" and the
+mics. The Surface Laptop 7 has the same codecs as the ThinkPad T14s Gen 6: two WSA8845
+speaker amplifiers and a WCD9385 headset codec.
+
+| alsa-ucm-conf | Surface Laptop 7 |
+|---|---|
+| 1.2.14 (April 2025; Debian 13) | No profile. Install the four files below |
+| 1.2.15 (December 2025) | Matched by DMI to the T14s profile (commit c93b7c8). Headphones still use class-H mode, which clips bass at low volume. Install the four files below to fix that |
+| 1.2.16 (June 2026) and later | Matched, with the class-AB headphone sequence (commit 3cf9df3). Nothing to install |
+
+The files in [`config/audio/ucm2/`](../config/audio/ucm2/) are from alsa-ucm-conf, so they
+keep its BSD-3-Clause license:
+
+| File | What it is |
+|---|---|
+| `conf.d/x1e80100/SurfaceLaptop7.conf` | The card entry: LENOVO-T14s.conf pointing at Romulus-HiFi.conf, plus `RX HPH Mode = CLS_AB_LOHIFI` in the boot sequence |
+| `Qualcomm/x1e80100/Romulus-HiFi.conf` | T14s-HiFi.conf with the Headphones device using the two files below |
+| `codecs/wcd938x/HeadphoneABEnableSeq.conf` | Unchanged copy of the 1.2.16 file: sets `RX HPH Mode` to `CLS_AB_LOHIFI` |
+| `codecs/qcom-lpass/rx-macro/HeadphoneABEnableSeq.conf` | 1.2.16's rx-macro HeadphoneEnableSeq.conf under a new name. 1.2.14's version forces `CLS_H_ULP` after the codec sequence and turns the compander on, so it must not be included |
+
+UCM first looks for `conf.d/<driver>/<card long name>.conf`, so the card entry must be
+installed under the long name of your card. That name ends in a configuration code that
+differs between models, so it is not hard-coded here. Install:
+
+    cd config/audio/ucm2
+    longname=$(awk '/X1E80100-Romulus$/ { getline; sub(/^ +/, ""); print; exit }' /proc/asound/cards)
+    echo "$longname"     # MicrosoftCorporation-MicrosoftSurfaceLaptop7thEdition-...
+    sudo install -m 0644 conf.d/x1e80100/SurfaceLaptop7.conf \
+        "/usr/share/alsa/ucm2/conf.d/x1e80100/$longname.conf"
+    sudo install -m 0644 Qualcomm/x1e80100/Romulus-HiFi.conf /usr/share/alsa/ucm2/Qualcomm/x1e80100/
+    sudo install -m 0644 codecs/wcd938x/HeadphoneABEnableSeq.conf /usr/share/alsa/ucm2/codecs/wcd938x/
+    sudo install -m 0644 codecs/qcom-lpass/rx-macro/HeadphoneABEnableSeq.conf \
+        /usr/share/alsa/ucm2/codecs/qcom-lpass/rx-macro/
+    systemctl --user restart wireplumber
+
+Check: `alsaucm -c hw:0 list _devices/HiFi` lists Speaker, Headphones, Headset and Mic. With
+headphones playing, `amixer -c0 cget name='RX HPH Mode'` shows `values=8` (`CLS_AB_LOHIFI`).
+
+These files are not owned by any package, so an alsa-ucm-conf upgrade leaves them in place.
+After upgrading to 1.2.16 or later, delete the card entry, `Romulus-HiFi.conf` and the
+rx-macro file. The wcd938x file then belongs to the package.
+
+The files were checked by loading them into a copy of the 1.2.14 tree with
+`ALSA_CONFIG_UCM2` and comparing `alsaucm dump text` with the installed setup: identical.
+
+## 4. WirePlumber: keep the HiFi profile
+
+If the card first appeared before the UCM files were installed, WirePlumber saved the
+"pro-audio" profile and restores it at every login. Pro-audio bypasses UCM, so the codec never
+gets its enable sequence, and the headphones play loud noise. `wpctl status` then shows sinks
+named "Pro" or "Pro 1".
+
+[`51-force-hifi-profile.conf`](../config/audio/wireplumber/51-force-hifi-profile.conf) pins
+the card (`alsa_card.platform-sound`) to HiFi and turns off automatic profile selection
+(WirePlumber 0.5 or later):
+
+    install -D -m 0644 config/audio/wireplumber/51-force-hifi-profile.conf \
+        ~/.config/wireplumber/wireplumber.conf.d/51-force-hifi-profile.conf
+    systemctl --user restart wireplumber
+
+Also check `~/.local/state/wireplumber/default-profile`. Its `alsa_card.platform-sound=` line
+should say `HiFi`, or be deleted.
+
+## Speakers
+
+The speaker volume slider (UCM mixer element `Speakers`) drives both WSA8845 `PA Volume`
+controls directly. There is no speaker protection on Linux for these amplifiers.
+
+- On the 7.0 kernel the controls ran 0 to 31 with nothing limiting them, so 100% meant full
+  amplifier gain. Keep the volume moderate on kernels like that.
+- The Ubuntu 7.3.0-9.9 source this repo's kernel is built from caps them in
+  `sound/soc/qcom/x1e80100.c` "until we have active speaker protection": `PA Volume` at 6
+  (0 dB) and the WSA digital volume at -3 dB. Mainline 7.0-rc4 has no such cap.
+- Open question on 7.3: alsa-ucm-conf's speaker sequence (1.2.14 and current upstream) writes
+  `PA Volume` 12, which is above that cap, and the kernel rejects values above the cap with
+  `EINVAL`. If UCM stops the sequence there, the right amplifier's settings that follow would
+  not be applied. This has not been checked. Test both channels at low volume
+  (`speaker-test -c 2 -t wav -D default`), and look for `PA Volume` errors in
+  `journalctl --user -b -u wireplumber`.
+
+To keep the speakers off entirely, a WirePlumber rule that matches
+`node.name = "alsa_output.platform-sound.HiFi__Speaker__sink"` and sets `node.disabled = true`
+works. It was used here from September to October 2026.
+
+## Credits
+
+- alsa-ucm-conf ([alsa-project/alsa-ucm-conf](https://github.com/alsa-project/alsa-ucm-conf)):
+  the X1E80100 and T14s profiles by Srinivas Kandagatla, the Surface Laptop 7 DMI match
+  (c93b7c8, by quic-kdybcio), and the class-AB headphone sequence and compander fix by Val
+  Packett (3cf9df3, 8e6acab; upstream issue #670).
+- linux-firmware: the `X1E80100-Romulus` AudioReach topology.
+- qcom-firmware-extract: Tobias Heider and contributors.

@@ -1,0 +1,76 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# initramfs-tools hook: put the Surface Laptop 7 (X1E80100 "Romulus") ADSP
+# and CDSP firmware into the initramfs.
+#
+# With MODULES=most, qcom_q6v5_pas probes from the initramfs, before the root
+# file system is mounted. If the firmware is not in the initramfs, the ADSP
+# and CDSP boots fail once with -ENOENT and are never retried: the ADSP stays
+# offline and the sound card never registers.
+#
+# Install:
+#   sudo install -m 0755 initramfs-hook-qcom-romulus-firmware \
+#        /etc/initramfs-tools/hooks/qcom-romulus-firmware
+#   sudo update-initramfs -u -k all
+#
+# The file names come from the remoteproc nodes' firmware-name properties in
+# the running device tree, or the Romulus defaults below when there are none
+# (a chroot, for example). Files under /lib/firmware/updates/ (where
+# qcom-firmware-extract installs them) and .zst/.xz files are found too.
+# This hook ships no firmware: see docs/audio.md for where it comes from.
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in prereqs) prereqs; exit 0 ;; esac
+
+# shellcheck source=/dev/null
+. /usr/share/initramfs-tools/hook-functions
+
+DEFAULT_FIRMWARE="
+qcom/x1e80100/microsoft/Romulus/qcadsp8380.mbn
+qcom/x1e80100/microsoft/Romulus/adsp_dtbs.elf
+qcom/x1e80100/microsoft/Romulus/qccdsp8380.mbn
+qcom/x1e80100/microsoft/Romulus/cdsp_dtbs.elf
+"
+
+# firmware-name entries of the ADSP and CDSP in the running device tree.
+dt_firmware() {
+	for c in /proc/device-tree/soc@0/remoteproc@*/compatible; do
+		[ -r "$c" ] || continue
+		case "$(tr '\0' ' ' < "$c")" in
+		*-adsp-pas*|*-cdsp-pas*)
+			tr '\0' '\n' < "${c%/compatible}/firmware-name" 2>/dev/null ;;
+		esac
+	done
+}
+
+# Copy one firmware file, searching the kernel's firmware paths. Uses
+# add_firmware from hook-functions where it exists (it handles compressed
+# files since initramfs-tools 0.143); the fallback searches the same paths.
+copy_fw() {
+	if command -v add_firmware >/dev/null 2>&1; then
+		add_firmware "$1"
+		return
+	fi
+	for dir in "/lib/firmware/updates/${version:-}" /lib/firmware/updates \
+		"/lib/firmware/${version:-}" /lib/firmware; do
+		for ext in "" .zst .xz; do
+			if [ -e "$dir/$1$ext" ]; then
+				copy_file firmware "$dir/$1$ext" || true
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
+firmware=$(dt_firmware)
+[ -n "$firmware" ] || firmware=$DEFAULT_FIRMWARE
+
+for fw in $firmware; do
+	copy_fw "$fw" ||
+		echo "W: qcom-romulus-firmware: $fw not found; ADSP/CDSP will not start from the initramfs" >&2
+done
+exit 0
