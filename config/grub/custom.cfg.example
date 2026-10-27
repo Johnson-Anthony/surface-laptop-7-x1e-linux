@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# GRUB menu entries for the 7.3.0-sl7 kernel on the Surface Laptop 7, as used on the
+# tested machine (13.8", X1E80100). See docs/kernel-7.3.md.
+#
+# Where it goes: append the two entries to /boot/grub/custom.cfg on the partition whose
+# GRUB the firmware actually starts. The stock /etc/grub.d/41_custom sources that file
+# at boot, so update-grub is not needed and does not overwrite it. On the tested
+# machine that GRUB belongs to another distribution's partition, not to the one that
+# runs this kernel. recordfail and $menuentry_id_option come from the grub.cfg of
+# Debian and Ubuntu GRUB; drop recordfail if your grub.cfg does not define it. Check the
+# result with grub-script-check custom.cfg.
+#
+# Replace:
+#   ROOT_UUID    file system UUID of the root partition (blkid -s UUID -o value /dev/...).
+#                The placeholder has no angle brackets because GRUB's parser treats
+#                < and > as special characters.
+#   7.3.0-sl7    the kernel release, if yours differs (uname -r on that kernel)
+# The paths below assume /boot is on the root partition. With a separate /boot,
+# search for the /boot partition's UUID and drop "/boot" from the paths.
+#
+# Kernel parameters:
+#   root=UUID=ROOT_UUID ro
+#       The root file system, mounted read-only until fsck has run.
+#   clk_ignore_unused
+#       Do not switch off clocks that firmware left on and no driver has claimed yet.
+#       Most X1E drivers are modules that load late; without this the clock framework
+#       turns off clocks the display and other blocks still use.
+#   pd_ignore_unused
+#       The same for power domains (genpd's "power off unused domains" pass).
+#   cma=128M
+#       Size of the contiguous memory pool used by display, GPU, camera and video
+#       buffers. The 7.3 device tree already reserves 128 MiB (reserved-memory
+#       linux,cma), so with that DTB this only moves the pool; it matters with a DTB
+#       that lacks the node (the kernel config default is 32 MiB). About 100 MiB of it
+#       was in use on the tested machine with a desktop session running.
+#   efi=noruntime
+#       Do not call UEFI runtime services. Kept from the community X1E boot setups;
+#       not re-tested without it here. EFI variables still work: on Snapdragon
+#       laptops they go through the TrustZone uefisecapp (qcom_qseecom), not runtime
+#       services.
+#   mem_sleep_default=deep
+#       Make "suspend" use PSCI SYSTEM_SUSPEND. At EL1 under the Gunyah hypervisor
+#       this is the only mode that reaches CX collapse, AOSS sleep and DDR self-refresh
+#       (263-276 mW measured on 7.3.0-sl7). s2idle stays shallow on this machine.
+#   fw_devlink.sync_state=timeout
+#       After the deferred-probe timeout, call sync_state() on providers that are still
+#       waiting for consumers which will never probe. Here that is the GCC and GPUCC
+#       clock controllers, held back by the GPU's GMU node, which has no driver yet
+#       ("Timed out. Forcing sync_state()" about 23 s after boot). Without it they keep
+#       their boot-time votes and the SoC never sleeps deeply.
+#   quiet splash
+#       Normal boot screen. The rescue entry leaves them out so the boot messages show.
+#
+# devicetree:
+#   The firmware only describes the machine with ACPI, which Linux does not use on this
+#   SoC, so GRUB loads a device tree for the kernel. /boot/dtb-<kver> is a symlink to
+#   the boot DTB that tools/dtb/build-dtbs --install builds: the packaged romulus15
+#   DTB plus the IR camera overlays. The rescue entry boots the packaged DTB as built
+#   (no IR camera), which is the fallback if an overlay breaks something.
+#   romulus15 is the 15" board file. The 13.8" boots it because the ItsLucas kit adds
+#   the touchpad, touchscreen, cameras and panel power rails only there (see
+#   docs/hardware.md).
+
+menuentry 'Linux 7.3.0-sl7 (Surface Laptop 7)' --class gnu-linux --class gnu --class os $menuentry_id_option 'sl7-7.3.0-sl7-ROOT_UUID' {
+	recordfail
+	load_video
+	set gfxpayload=$linux_gfx_mode
+	insmod gzio
+	insmod part_gpt
+	insmod ext2
+	search --no-floppy --fs-uuid --set=root ROOT_UUID
+	linux	/boot/vmlinuz-7.3.0-sl7 root=UUID=ROOT_UUID ro clk_ignore_unused pd_ignore_unused cma=128M efi=noruntime mem_sleep_default=deep fw_devlink.sync_state=timeout quiet splash
+	initrd	/boot/initrd.img-7.3.0-sl7
+	devicetree	/boot/dtb-7.3.0-sl7
+}
+menuentry 'Linux 7.3.0-sl7 (Surface Laptop 7, rescue DTB)' --class gnu-linux --class gnu --class os $menuentry_id_option 'sl7-7.3.0-sl7-rescue-ROOT_UUID' {
+	recordfail
+	load_video
+	set gfxpayload=$linux_gfx_mode
+	insmod gzio
+	insmod part_gpt
+	insmod ext2
+	search --no-floppy --fs-uuid --set=root ROOT_UUID
+	linux	/boot/vmlinuz-7.3.0-sl7 root=UUID=ROOT_UUID ro clk_ignore_unused pd_ignore_unused cma=128M efi=noruntime mem_sleep_default=deep fw_devlink.sync_state=timeout
+	initrd	/boot/initrd.img-7.3.0-sl7
+	devicetree	/boot/dtbs/7.3.0-sl7/qcom/x1e80100-microsoft-romulus15.dtb
+}

@@ -1,0 +1,193 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+# The sh -c snippets below expand in their own shell:
+# shellcheck disable=SC2016
+#
+# Hardware checklist for the first boot of a new Surface Laptop 7 kernel.
+#
+# Read-only: it changes nothing on the system. It prints a short summary and saves
+# the full output (dmesg, lsmod, sysfs and debugfs state) in a new directory
+# <kver>-<time>/ under the output directory. The full output contains MAC addresses,
+# serial numbers, partition UUIDs and network interface names, so keep it private.
+# With --share it also writes share.txt: the summary plus the kernel's error and
+# warning lines, with those values replaced by placeholders, for an issue report.
+# Read share.txt before you post it; the filter is pattern-based.
+#
+# Checks that need the desktop session (audio server, libcamera, face unlock) are
+# printed as commands to run afterwards.
+#
+# Usage: sudo first-boot-check [--out DIR] [--share]
+#   --out DIR   parent directory for the run (default: the invoking user's
+#               ${XDG_STATE_HOME:-~/.local/state}/sl7/first-boot)
+#   --share     also write share.txt and print its path
+set -u
+
+usage() { sed -n '/^# Usage:/,/^set -u/{ /^set -u/d; s/^# \{0,1\}//; p; }' "$0" >&2; exit 2; }
+
+outdir=
+share=no
+while [ $# -gt 0 ]; do
+	case $1 in
+	--out) [ $# -ge 2 ] || usage; outdir=$2; shift ;;
+	--out=*) outdir=${1#--out=} ;;
+	--share) share=yes ;;
+	-h|--help) usage ;;
+	*) echo "unknown argument $1" >&2; usage ;;
+	esac
+	shift
+done
+
+[ "$(id -u)" -eq 0 ] || echo "warning: not root; dmesg and debugfs checks may come out empty" >&2
+
+# Files go to the user who ran sudo, not to root.
+user=${SUDO_USER:-}
+[ "$user" = root ] && user=
+if [ -n "$user" ]; then
+	home=$(getent passwd "$user" | cut -d: -f6)
+else
+	home=$HOME
+fi
+[ -n "$outdir" ] || outdir=${XDG_STATE_HOME:-$home/.local/state}/sl7/first-boot
+
+kver=$(uname -r)
+out=$outdir/$kver-$(date +%Y%m%d-%H%M%S)
+# Create the run directory, giving any directory this creates to $user.
+created=$(d=$out; while [ ! -d "$d" ]; do printf '%s\n' "$d"; d=$(dirname -- "$d"); done)
+mkdir -p -- "$out" || exit 1
+if [ -n "$user" ]; then
+	printf '%s\n' "$created" | while IFS= read -r d; do
+		[ -n "$d" ] && chown -- "$user:" "$d"
+	done
+fi
+
+here=$(cd "$(dirname "$0")" && pwd)
+yn() { if eval "$1" >/dev/null 2>&1; then echo yes; else echo NO; fi; }
+save() { f=$1; shift; "$@" > "$out/$f" 2>&1; }
+
+save cmdline cat /proc/cmdline
+save dmesg dmesg
+save dmesg-errors dmesg --level=emerg,alert,crit,err,warn
+save failed-units systemctl --failed --no-legend
+save lsmod lsmod
+save machine sh -c 'cd /sys/class/dmi/id && for f in sys_vendor product_name product_sku bios_version; do echo "$f: $(cat $f 2>/dev/null)"; done; echo "dt model: $(tr -d "\0" < /proc/device-tree/model 2>/dev/null)"'
+if [ -x "$here/../status/sl7-status" ]; then
+	save sl7-status "$here/../status/sl7-status"
+fi
+save remoteproc sh -c 'for r in /sys/class/remoteproc/*; do echo "$(cat $r/name) $(cat $r/state)"; done'
+save drm sh -c 'for c in /sys/class/drm/card*-*; do echo "${c##*/} $(cat $c/status)"; done'
+save input sh -c 'grep -E "^N: Name" /proc/bus/input/devices'
+save power-supply sh -c 'for p in /sys/class/power_supply/*; do echo "${p##*/} $(cat $p/status 2>/dev/null) $(cat $p/capacity 2>/dev/null)"; done'
+save net sh -c 'ip -br link; rfkill list'
+save bt sh -c 'bluetoothctl show 2>&1 | head -8'
+save asound cat /proc/asound/cards
+save media sh -c 'for m in /dev/media*; do echo "== $m"; media-ctl -d $m -p 2>&1 | grep -E "^- entity|driver"; done'
+save video sh -c 'for v in /sys/class/video4linux/*; do echo "${v##*/} $(cat $v/name)"; done'
+save typec sh -c 'ls /sys/class/typec; lsusb'
+save synced sh -c 'for d in /sys/bus/platform/devices/*; do [ -f $d/state_synced ] && echo "${d##*/} $(cat $d/state_synced)"; done'
+save genpd cat /sys/kernel/debug/pm_genpd/pm_genpd_summary
+save spi-hid sh -c 'cat /sys/module/spi_hid/version 2>/dev/null || echo "no version (stock)"; for d in /sys/bus/spi/devices/spi*; do echo "${d##*/} drv=$(basename $(readlink $d/driver) 2>/dev/null) ready=$(cat $d/ready 2>/dev/null)"; done; grep -E "spi[0-9]" /proc/interrupts'
+save sleep sh -c 'echo "mem_sleep: $(cat /sys/power/mem_sleep)"; echo "suspends: $(cat /sys/power/suspend_stats/success) ok, $(cat /sys/power/suspend_stats/fail) failed"'
+
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+sku=$(cat /sys/class/dmi/id/product_sku 2>/dev/null)
+bios=$(cat /sys/class/dmi/id/bios_version 2>/dev/null)
+wififw=$(grep -m1 -oE 'QC_IMAGE_VERSION_STRING=[^ ]+' "$out/dmesg" | cut -d= -f2)
+panel=$(grep -m1 -oE 'Unknown panel [^,]+|Detected [^(]+\([^)]*\)' "$out/dmesg")
+
+{
+	echo "== $kver ($model)"
+	echo "machine: SKU ${sku:-?}, UEFI ${bios:-?}"
+	echo "DTB: IR camera $(yn '[ -e /proc/device-tree/soc@0/cci@ac15000/i2c-bus@0/camera@10 ]')," \
+		"domain_ss3 residency $(od -An -tu4 --endian=big /proc/device-tree/cpus/domain-idle-states/domain-sleep-0/min-residency-us 2>/dev/null | tr -d ' ') us"
+	echo "display: $(tr '\n' ' ' < "$out/drm")"
+	echo "panel: ${panel:-not reported}"
+	echo "remoteprocs: $(tr '\n' ' ' < "$out/remoteproc")"
+	echo "keyboard (SAM): $(yn 'grep -qi "surface.*keyboard\|keyboard.*surface\|SAM" '"$out/input"''), battery: $(grep -E '^(BAT|qcom-battmgr-bat)' "$out/power-supply" | tr '\n' ' ')"
+	echo "spi_hid: $(head -1 "$out/spi-hid"), $(grep -c 'drv=spi_hid' "$out/spi-hid") devices bound"
+	echo "wifi: $(yn 'ip -br link | grep -q ^wl') (firmware ${wififw:-not reported}), bt: $(yn 'grep -q "Powered: yes" '"$out/bt"'')"
+	echo "sound cards: $(grep -c '^ *[0-9]' "$out/asound")"
+	echo "cameras: $(grep -oE 'entity [0-9]+: (vd55g0|ov02c10) [^ ]*' "$out/media" | cut -d' ' -f3- | tr '\n' ',')"
+	echo "iris video codec: $(yn 'grep -qi iris '"$out/video"'')"
+	echo "qcrypto bound: $(yn 'ls /sys/bus/platform/drivers/qcrypto/ | grep -q "\."')"
+	echo "not synced: $(awk '$2 != 1 { printf "%s ", $1 }' "$out/synced")"
+	echo "sleep: $(tr '\n' ' ' < "$out/sleep")"
+	echo "taint: $(cat /proc/sys/kernel/tainted)"
+	echo "failed units: $(wc -l < "$out/failed-units"), dmesg err/warn lines: $(wc -l < "$out/dmesg-errors")"
+} > "$out/summary"
+cat "$out/summary"
+echo "log: $out"
+
+# Replace MAC addresses, UUIDs, serial numbers, IPv4 addresses, home paths and
+# (as whole words) the network interface names, host name and user name.
+sanitize() {
+	words=$(
+		n=0
+		for i in /sys/class/net/*; do
+			i=${i##*/}
+			[ "$i" = lo ] && continue
+			n=$((n + 1))
+			printf '%s\t<if%s>\n' "$i" "$n"
+		done
+		printf '%s\t<host>\n' "$(hostname 2>/dev/null)"
+		[ -n "$user" ] && printf '%s\t<user>\n' "$user"
+	)
+	sed -E \
+		-e 's/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/<mac>/g' \
+		-e 's/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/<uuid>/g' \
+		-e 's/((PART)?UUID=)[^ ]+/\1<uuid>/g' \
+		-e 's/([Ss]erial ?[Nn]umber|[Ss]erial_number|S\/N)( *[:=] *| +)[^ ,;)]+/\1\2<serial>/g' \
+		-e 's/\bserial=[^ ,;)]+/serial=<serial>/g' \
+		-e 's#/home/[^/ ]+#/home/<user>#g' \
+		-e 's/(^|[^0-9.])([0-9]{1,3}\.){3}[0-9]{1,3}($|[^0-9.])/\1<ip>\3/g' |
+	awk -v words="$words" '
+	function repl(s, t, r,    out, p, pre, post) {
+		out = ""
+		while ((p = index(s, t)) > 0) {
+			pre = p > 1 ? substr(s, p - 1, 1) : ""
+			post = substr(s, p + length(t), 1)
+			if (pre !~ /[A-Za-z0-9_.-]/ && post !~ /[A-Za-z0-9_-]/)
+				out = out substr(s, 1, p - 1) r
+			else
+				out = out substr(s, 1, p - 1 + length(t))
+			s = substr(s, p + length(t))
+		}
+		return out s
+	}
+	BEGIN { n = split(words, w, "\n") }
+	{
+		for (i = 1; i <= n; i++) {
+			split(w[i], kv, "\t")
+			if (length(kv[1]) >= 3)
+				$0 = repl($0, kv[1], kv[2])
+		}
+		print
+	}'
+}
+
+if [ $share = yes ]; then
+	{
+		echo "# first-boot-check summary for an issue report"
+		echo "# MAC addresses, UUIDs, serial numbers, IPv4 addresses and interface, host"
+		echo "# and user names are replaced by placeholders. Check before posting."
+		echo "kernel: $kver $(uname -v)"
+		echo "cmdline: $(cat /proc/cmdline)"
+		cat "$out/summary"
+		echo
+		echo "== kernel errors and warnings (first 300 lines)"
+		head -300 "$out/dmesg-errors"
+	} | sanitize > "$out/share.txt"
+	echo "share: $out/share.txt"
+fi
+
+tools=$(cd "$here/.." && pwd)
+cat <<EOF
+
+As the desktop user:
+  wpctl status | sed -n '/Sinks/,/Sources/p'     # speaker and headphone sinks
+  cam -l                                          # RGB and IR cameras via libcamera
+  $tools/ir-camera/check-ir    # IR sensor stream (docs/ir-camera.md)
+  pamtester polkit-1 \$USER authenticate          # face unlock (Howdy), if set up
+EOF
+[ -n "$user" ] && chown -R -- "$user:" "$out"
+exit 0

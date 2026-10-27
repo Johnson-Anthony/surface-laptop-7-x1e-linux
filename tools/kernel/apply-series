@@ -1,0 +1,104 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Apply the ItsLucas Surface Laptop 7 patch kit to a kernel git tree, one commit
+# per patch, with the same rules as the kit's CI (ci/common.py, apply_patches()):
+#
+#   - every patch in patches/series, then patches/series-if-needed, in that order;
+#   - patch -p1 --forward --fuzz=0: a patch that needs fuzz fails;
+#   - a patch from series-if-needed that does not apply is skipped only when a
+#     reverse dry run shows all of its hunks are already in the tree.
+#
+# Kit: https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel (tested at 2ce3083).
+#
+# Authorship: when a patch has a mail header (From:, Date:, Subject:), the commit
+# keeps that author, date and message, as git am would. The kit's own patches
+# (0001-0022) have no From: line, so those commits are made under YOUR git
+# identity (user.name/user.email in the tree) with an "itslucas: <file>" subject.
+# That is fine for a local build branch. Do not push such a branch anywhere
+# public: it would show you as the author of other people's work.
+#
+# The tree must be a git work tree with no local changes and no untracked
+# files, because each commit takes the whole tree (git add -A). Unlike the
+# kit's CI, GNU patch runs with --no-backup-if-mismatch, so a hunk that applies
+# at an offset leaves no .orig file behind.
+#
+# Usage: apply-series KERNEL_TREE KIT_CHECKOUT
+#   KERNEL_TREE   git work tree of the kernel source (for example the Ubuntu
+#                 linux-source import described in patches/kernel-7.3/BASE.md)
+#   KIT_CHECKOUT  checkout of the ItsLucas kit (the directory that has patches/)
+set -eu
+
+usage() { sed -n '/^# Usage:/,/^set -eu/{ /^set -eu/d; s/^# \{0,1\}//; p; }' "$0" >&2; exit 2; }
+
+case ${1:-} in -h|--help) usage ;; esac
+[ $# -eq 2 ] || usage
+command -v patch >/dev/null || { echo "GNU patch not found (package patch)" >&2; exit 1; }
+
+tree=$(cd "$1" && pwd)
+kit=$(cd "$2" && pwd)
+p=$kit/patches
+[ -f "$p/series" ] || { echo "$p/series not found: is $kit the kit checkout?" >&2; exit 1; }
+git -C "$tree" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+	{ echo "$tree is not a git work tree" >&2; exit 1; }
+if [ -n "$(git -C "$tree" status --porcelain)" ]; then
+	echo "$tree has local changes or untracked files; commit or clean them first" >&2
+	exit 1
+fi
+if ! git -C "$tree" config user.email >/dev/null; then
+	echo "set user.name and user.email in $tree first (they author the kit's commits)" >&2
+	exit 1
+fi
+rev=$(git -C "$kit" rev-parse --short HEAD 2>/dev/null || echo unknown)
+echo "kit $rev; commits without a From: header will be authored by" \
+	"$(git -C "$tree" config user.name) <$(git -C "$tree" config user.email)>" >&2
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+names() { if [ -f "$1" ]; then sed -e '/^#/d' -e '/^[[:space:]]*$/d' "$1"; fi; }
+optional=$(names "$p/series-if-needed")
+
+commit() { # $1 = patch file, $2 = its name in the kit
+	git -C "$tree" add -A
+	# A mail header means the patch carries its own author: keep it.
+	if sed -n '1,/^---$/p' "$1" | grep -q '^From: ' &&
+	   git -C "$tree" mailinfo "$tmp/msg" "$tmp/diff" < "$1" > "$tmp/info"; then
+		author=$(sed -n 's/^Author: //p' "$tmp/info")
+		email=$(sed -n 's/^Email: //p' "$tmp/info")
+		date=$(sed -n 's/^Date: //p' "$tmp/info")
+		subject=$(sed -n 's/^Subject: //p' "$tmp/info")
+		{
+			printf '%s\n\n' "$subject"
+			cat "$tmp/msg"
+			printf '\n[Applied from ItsLucas SL7 kit %s, patches/%s]\n' "$rev" "$2"
+		} > "$tmp/commit-msg"
+		if [ -n "$date" ]; then
+			git -C "$tree" commit -q --author="$author <$email>" --date="$date" -F "$tmp/commit-msg"
+		else
+			git -C "$tree" commit -q --author="$author <$email>" -F "$tmp/commit-msg"
+		fi
+	else
+		git -C "$tree" commit -q -m "itslucas: $2" \
+			-m "From ItsLucas SL7 kit $rev, patches/$2"
+	fi
+}
+
+# Patch names never contain spaces; split the lists on whitespace.
+# shellcheck disable=SC2046,SC2086
+for name in $(names "$p/series") $optional; do
+	f=$p/$name
+	if (cd "$tree" && patch --batch --forward --fuzz=0 -p1 --dry-run -i "$f" >/dev/null); then
+		(cd "$tree" && patch --batch --forward --fuzz=0 -p1 --no-backup-if-mismatch -s -i "$f")
+		commit "$f" "$name"
+		echo "applied     $name"
+	elif printf '%s\n' "$optional" | grep -qx "$name" &&
+	     (cd "$tree" && patch --batch --force --reverse --fuzz=0 -p1 --dry-run -i "$f" >/dev/null); then
+		echo "not needed  $name"
+	else
+		echo "FAILED      $name" >&2
+		(cd "$tree" && patch --batch --forward --fuzz=0 -p1 --dry-run -i "$f" >&2) || true
+		exit 1
+	fi
+done

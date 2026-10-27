@@ -1,0 +1,91 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Write .config for the 7.3.0-sl7 kernel into a patched kernel tree.
+#
+# Default: copy config/kernel/config-7.3.0-sl7, the config the tested laptop runs,
+# and run make olddefconfig. Only values your toolchain reports (compiler, rustc
+# and pahole versions) should change; the script lists every difference.
+#
+# --base FILE: start from another config, merge config/kernel/sl7.fragment into it
+# with the tree's scripts/kconfig/merge_config.sh, then run make olddefconfig.
+# Fragment values that did not survive are listed at the end. Tested with Ubuntu's
+# config-7.3.0-9-generic (/usr/lib/linux/7.3.0-9-generic/config in the
+# linux-buildinfo-7.3.0-9-generic package).
+#
+# Usage: make-config [--base FILE] KERNEL_TREE
+#   KERNEL_TREE   kernel source tree with patches/kernel-7.3 applied
+#   --base FILE   start from FILE plus the fragment instead of the shipped config
+# Environment: ARCH and CROSS_COMPILE are passed to make as usual.
+set -eu
+
+usage() { sed -n '/^# Usage:/,/^set -eu/{ /^set -eu/d; s/^# \{0,1\}//; p; }' "$0" >&2; exit 2; }
+
+base=
+while [ $# -gt 0 ]; do
+	case $1 in
+	--base) [ $# -ge 2 ] || usage; base=$2; shift ;;
+	--base=*) base=${1#--base=} ;;
+	-h|--help) usage ;;
+	-*) echo "unknown option $1" >&2; usage ;;
+	*) break ;;
+	esac
+	shift
+done
+[ $# -eq 1 ] || usage
+
+here=$(cd "$(dirname "$0")" && pwd)
+cfg=$(cd "$here/../../config/kernel" && pwd)
+shipped=$cfg/config-7.3.0-sl7
+fragment=$cfg/sl7.fragment
+tree=$(cd "$1" && pwd)
+[ -x "$tree/scripts/kconfig/merge_config.sh" ] ||
+	{ echo "$tree does not look like a kernel tree (no scripts/kconfig/merge_config.sh)" >&2; exit 1; }
+[ -z "$base" ] || [ -f "$base" ] || { echo "$base not found" >&2; exit 1; }
+grep -q '^config SPI_HID$' "$tree/drivers/hid/spi-hid/Kconfig" 2>/dev/null ||
+	echo "warning: no drivers/hid/spi-hid in $tree; apply the ItsLucas kit first" >&2
+
+if [ -f "$tree/.config" ]; then
+	cp "$tree/.config" "$tree/.config.before-make-config"
+	echo "previous .config saved as .config.before-make-config"
+fi
+
+if [ -z "$base" ]; then
+	cp "$shipped" "$tree/.config"
+	make -C "$tree" -s olddefconfig
+	echo "== differences from config/kernel/config-7.3.0-sl7 (expected: toolchain values only)"
+	if command -v python3 >/dev/null; then
+		d=$(python3 "$tree/scripts/diffconfig" "$shipped" "$tree/.config" || true)
+	else
+		d=$(diff "$shipped" "$tree/.config" | grep '^[<>] CONFIG_' || true)
+	fi
+	printf '%s\n' "${d:-(none)}"
+	exit 0
+fi
+
+cp "$base" "$tree/.config"
+(cd "$tree" && scripts/kconfig/merge_config.sh -m -O . .config "$fragment" >/dev/null)
+make -C "$tree" -s olddefconfig
+
+# Report fragment values that olddefconfig dropped (missing dependencies, or
+# symbols that do not exist in this tree).
+lost=0
+while IFS= read -r line; do
+	case $line in
+	CONFIG_*=*)
+		sym=${line%%=*}
+		grep -qxF "$line" "$tree/.config" && continue
+		got=$(grep -E "^$sym=|^# $sym is not set" "$tree/.config" || echo "absent")
+		;;
+	"# CONFIG_"*" is not set")
+		sym=${line#\# }; sym=${sym%% *}
+		grep -q "^$sym=" "$tree/.config" || continue
+		got=$(grep "^$sym=" "$tree/.config")
+		;;
+	*) continue ;;
+	esac
+	echo "fragment wanted: $line   got: $got"
+	lost=$((lost + 1))
+done < "$fragment"
+echo "== $lost fragment value(s) not in the final .config"
