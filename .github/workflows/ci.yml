@@ -42,6 +42,8 @@ jobs:
               get "$f" "https://raw.githubusercontent.com/torvalds/linux/v7.3/scripts/$f"
           done
           # Signed-off-by is added by the human submitter, not stored here
-          # (see patches/kernel-7.3/README.md).
-          perl "$RUNNER_TEMP/cp/checkpatch.pl" --no-tree --strict --ignore MISSING_SIGN_OFF \
+          # (see patches/kernel-7.3/README.md). checkpatch checks any git-tracked
+          # argument as a source file rather than a patch; with no git directory
+          # it reads them as patches.
+          GIT_DIR=/nonexistent perl "$RUNNER_TEMP/cp/checkpatch.pl" --no-tree --strict --ignore MISSING_SIGN_OFF \
             patches/kernel-7.3/*.patch patches/kernel-7.3/build/*.patch
