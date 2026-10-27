@@ -1,0 +1,43 @@
+# Surface Laptop 7 13.8" (model 2036), kernel 7.3.0-sl7 (Ubuntu 7.3.0-9.9 + ItsLucas SL7 kit +
+# this repo's patches), booted at EL1 under Gunyah, UEFI 175.235.235, Oct 26-27 2026.
+#
+# Written by systemd/sl7-sleep-stats; read it with: tools/sleep/sleep-report --log <this file> 0
+# The data lines are copied unchanged from /var/log/sl7-sleep.log on that machine. Lines from the
+# older 7.0.0-rc4 kernel are left out (they are the ones with a bat1= value). These lines predate
+# the hook's mode= and kernel= fields, so "# mode=" comments give the sleep mode, taken from the
+# kernel log ("PM: suspend entry (deep)") of the same boot; sleep-report reads them.
+#
+# Fields: epoch (UTC), pre/post, action, then bat1/battmgr/full energy in uWh (7.3.0-sl7 has no
+# SAM BAT1; full= is empty in the first two pairs because the hook only read BAT1 then), then
+# qcom_stats <count>/<ticks of the 19.2 MHz timer> for aosd, cxsd, ddr, apss, adsp and cdsp.
+# Counters are cumulative since boot.
+# Boot A: 7.3.0-9.9+sl7.2 build, booted with mem_sleep_default=s2idle.
+# mode=s2idle
+1792977229 pre suspend bat1= battmgr=35646000 full= aosd=0/0 cxsd=0/0 ddr=0/0 apss=0/0 adsp=29815/4510808578 cdsp=3/5483679809
+1792977279 post suspend bat1= battmgr=35646000 full= aosd=0/0 cxsd=0/0 ddr=0/0 apss=0/0 adsp=29945/5455107701 cdsp=3/6448000760
+# mode=s2idle  (run 5 in docs/deep-sleep.md)
+1792977303 pre suspend bat1= battmgr=35646000 full= aosd=0/0 cxsd=0/0 ddr=0/0 apss=0/0 adsp=32496/5838568145 cdsp=3/6912179313
+1792977601 post suspend bat1= battmgr=35646000 full= aosd=0/0 cxsd=0/0 ddr=0/0 apss=0/0 adsp=32594/11562462368 cdsp=3/12639772775
+# From here on mem_sleep was set to deep at runtime (echo deep > /sys/power/mem_sleep).
+# mode=deep  (run 6)
+1792977722 pre suspend bat1= battmgr=35121000 full=52420000 aosd=0/0 cxsd=0/0 ddr=0/0 apss=0/0 adsp=44888/13485539204 cdsp=3/14963849508
+1792996454 post suspend bat1= battmgr=33754000 full=52740000 aosd=63/359121819136 cxsd=63/359123618440 ddr=63/359124659589 apss=1/359477402812 adsp=45252/372760463395 cdsp=3/374601551345
+# mode=deep  (run 7)
+1792996475 pre suspend bat1= battmgr=33754000 full=52740000 aosd=63/359121819136 cxsd=63/359123618440 ddr=63/359124659589 apss=1/359477402812 adsp=47431/373101393103 cdsp=3/375022177728
+1793003361 post suspend bat1= battmgr=33226000 full=52740000 aosd=86/491081021568 cxsd=86/491083463652 ddr=86/491084885400 apss=2/491555986091 adsp=47547/505180808877 cdsp=3/507223730374
+# mode=deep  (run 8)
+1793004599 pre suspend bat1= battmgr=29534000 full=52740000 aosd=86/491081021568 cxsd=86/491083463652 ddr=86/491084885400 apss=2/491555986091 adsp=172573/524780342877 cdsp=3/531027496654
+1793023224 post suspend bat1= battmgr=27724000 full=51340000 aosd=148/848189726560 cxsd=148/848193954811 ddr=148/848196396590 apss=3/849033300234 adsp=172714/882007665235 cdsp=3/888623558334
+# mode=deep  (run 9)
+1793023248 pre suspend bat1= battmgr=27724000 full=51340000 aosd=148/848189726560 cxsd=148/848193954811 ddr=148/848196396590 apss=3/849033300234 adsp=175124/882384727721 cdsp=3/889088913702
+1793041873 post suspend bat1= battmgr=26479000 full=51920000 aosd=210/1205299091728 cxsd=210/1205305107878 ddr=210/1205308573519 apss=4/1206512567920 adsp=175268/1239612587378 cdsp=3/1246686750793
+# mode=deep
+1793041897 pre suspend bat1= battmgr=26479000 full=51920000 aosd=210/1205299091728 cxsd=210/1205305107878 ddr=210/1205308573519 apss=4/1206512567920 adsp=177668/1239986601679 cdsp=3/1247148654151
+1793042317 post suspend bat1= battmgr=26479000 full=51920000 aosd=212/1213221404528 cxsd=212/1213227458226 ddr=212/1213230959013 apss=5/1214445697844 adsp=177749/1248026097030 cdsp=3/1255202408221
+# mode=deep  (run 10)
+1793043188 pre suspend bat1= battmgr=29075000 full=51920000 aosd=212/1213221404528 cxsd=212/1213227458226 ddr=212/1213230959013 apss=5/1214445697844 adsp=264270/1261378899084 cdsp=3/1271961000393
+1793052964 post suspend bat1= battmgr=28556000 full=51920000 aosd=245/1400511116896 cxsd=245/1400518106303 ddr=245/1400522156218 apss=6/1401901594625 adsp=264385/1448896560795 cdsp=3/1459653806679
+# Boot B: 7.3.0-9.9+sl7.3 build, booted with mem_sleep_default=deep.
+# mode=deep
+1793059266 pre suspend bat1= battmgr=35825000 full=51920000 aosd=0/0 cxsd=0/0 ddr=0/0 apss=0/0 adsp=30011/4550389090 cdsp=4/8122988203
+1793059275 post suspend bat1= battmgr=35825000 full=51920000 aosd=0/0 cxsd=0/0 ddr=0/0 apss=1/99970862 adsp=30011/4550389090 cdsp=4/8290522178

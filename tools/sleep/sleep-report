@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+"""Summarise the log written by the sl7-sleep-stats hook.
+
+For each suspend: how long it lasted, the sleep mode, battery drain (mW and %/h), and
+how much of the time the SoC spent in each deep-sleep state. aosd = AOSS sleep (XO
+shutdown), cxsd = CX collapse, ddr = DDR self-refresh, apss = application CPU
+subsystem collapse. aosd/cxsd/ddr all at 0 means the suspend stayed shallow. adsp is
+how many times the audio DSP went to sleep (each one follows a wakeup).
+
+Usage: sleep-report [--log PATH] [N]   show the last N suspends (default 10, 0 = all)
+The log defaults to /var/log/sl7-sleep.log. Lines starting with # are comments; a
+comment "# mode=MODE" supplies the sleep mode for the lines after it that don't log one
+(the hook only logs mode= since late Oct 2026).
+"""
+import argparse
+import re
+import sys
+import time
+
+TICK_HZ = 19_200_000
+STATES = ("aosd", "cxsd", "ddr", "apss")
+TEXT_FIELDS = ("mode", "kernel")
+
+
+def parse(line):
+    f = line.split()
+    rec = {"t": int(f[0]), "phase": f[1]}
+    for kv in f[3:]:
+        k, _, v = kv.partition("=")
+        if k in TEXT_FIELDS:
+            rec[k] = v or None
+        elif "/" in v:
+            c, _, d = v.partition("/")
+            rec[k] = (int(c), int(d)) if c.isdigit() and d.isdigit() else None
+        else:
+            rec[k] = int(v) if v.isdigit() else None
+    return rec
+
+
+def drain(a, b, hours):
+    """Drain in mW and %/h, from BAT1 if both readings exist, else from battmgr."""
+    e0, e1 = a.get("bat1"), b.get("bat1")
+    if not (e0 and e1):
+        e0, e1 = a.get("battmgr"), b.get("battmgr")
+    if not (e0 and e1) or hours <= 0:
+        return "?", "?"
+    mw = f"{(e0 - e1) / hours / 1000:.0f}mW"
+    full = a.get("full")
+    pct = f"{(e0 - e1) / full * 100 / hours:.2f}" if full else "?"
+    return mw, pct
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Per-suspend drain and SoC sleep residency.")
+    ap.add_argument("--log", default="/var/log/sl7-sleep.log", help="log file (default: %(default)s)")
+    ap.add_argument("n", nargs="?", type=int, default=10, help="last N suspends (0 = all)")
+    args = ap.parse_args()
+
+    recs, mode_note = [], None
+    try:
+        with open(args.log) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#"):
+                    m = re.match(r"#\s*mode=(\S+)", line)
+                    if m:
+                        mode_note = m.group(1)
+                    continue
+                if line:
+                    rec = parse(line)
+                    if not rec.get("mode"):
+                        rec["mode"] = mode_note
+                    recs.append(rec)
+    except FileNotFoundError:
+        sys.exit(f"{args.log} not found: is the hook installed, and has the laptop suspended since?")
+    except PermissionError:
+        sys.exit(f"{args.log}: permission denied (try sudo)")
+
+    pairs = [(a, b) for a, b in zip(recs, recs[1:]) if a["phase"] == "pre" and b["phase"] == "post"]
+    if not pairs:
+        sys.exit("no complete suspend/resume pairs logged yet")
+    if args.n > 0:
+        pairs = pairs[-args.n:]
+
+    print(f"{'start':14} {'length':>7} {'mode':>6} {'drain':>7} {'%/h':>5}  "
+          + "  ".join(f"{s:>11}" for s in STATES) + f"  {'adsp':>6}")
+    kernel = None
+    for a, b in pairs:
+        k = b.get("kernel") or a.get("kernel")
+        if k and k != kernel:
+            print(f"-- kernel {k}")
+            kernel = k
+        dt = b["t"] - a["t"]
+        start = time.strftime("%m-%d %H:%M", time.localtime(a["t"]))
+        mode = b.get("mode") or a.get("mode") or "?"
+        mw, pct = drain(a, b, dt / 3600)
+        cols = []
+        for s in STATES:
+            if a.get(s) and b.get(s):
+                dc = b[s][0] - a[s][0]
+                share = f"{100 * (b[s][1] - a[s][1]) / TICK_HZ / dt:.0f}%" if dt else "?"
+                cols.append(f"{dc:>4}x {share:>5}")
+            else:
+                cols.append(f"{'n/a':>11}")
+        adsp = f"{b['adsp'][0] - a['adsp'][0]}" if a.get("adsp") and b.get("adsp") else "n/a"
+        print(f"{start:14} {dt // 60:>6}m {mode:>6} {mw:>7} {pct:>5}  " + "  ".join(cols) + f"  {adsp:>6}")
+    print("\nPer state: times entered, and the share of the suspend spent in it."
+          "\nNegative drain means it was charging. Battery readings update slowly:"
+          "\ntrust drain only for suspends of 30 min or more.")
+
+
+main()

@@ -1,0 +1,87 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Deep-sleep status for this boot. Read-only. Run as root (debugfs), ideally after at
+# least one suspend and resume:
+#   1. Setup: sleep mode, sync_state, the ADSP standby notifier.
+#   2. Linux side: the system power domain's idle states, from the DT and genpd.
+#   3. SoC side: qcom_stats aosd/cxsd/ddr/apss, cumulative since boot.
+#   4. Per-suspend drain, from the sl7-sleep-stats hook's log (sleep-report).
+#
+# Usage: sudo check-sleep [--log PATH] [N]     N = suspends to list (default 5)
+log=/var/log/sl7-sleep.log
+if [ "${1:-}" = --log ]; then log=${2:?--log needs a path}; shift 2; fi
+n=${1:-5}
+D=/sys/kernel/debug
+here=$(dirname "$0")
+[ "$(id -u)" -eq 0 ] || echo "(not root: the debugfs sections will be empty)"
+[ -d $D/qcom_stats ] || modprobe qcom_stats 2>/dev/null
+
+echo "== setup"
+mode=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/power/mem_sleep)
+case $mode in
+deep) echo "mem_sleep: deep (PSCI SYSTEM_SUSPEND; the mode that reaches CX collapse at EL1)" ;;
+*) echo "mem_sleep: $mode (on this laptop at EL1, s2idle stays shallow; 'deep' is the mode to use)" ;;
+esac
+grep -o 'mem_sleep_default=[a-z0-9]*' /proc/cmdline || echo "mem_sleep_default: not set"
+grep -o 'fw_devlink.sync_state=[a-z]*' /proc/cmdline ||
+	echo "fw_devlink.sync_state: default (strict; gcc may never reach sync_state)"
+# gcc waits for 3d6a000.gmu, which has no driver; until it syncs, every GDSC the
+# firmware left on stays on and keeps CX up.
+for cc in 100000.clock-controller:gcc 3d90000.clock-controller:gpucc; do
+	printf '%s state_synced=%s  ' "${cc#*:}" "$(cat "/sys/bus/platform/devices/${cc%:*}/state_synced" 2>/dev/null || echo '?')"
+done
+echo
+unsynced=""
+for d in /sys/bus/platform/devices/*; do
+	[ "$(cat "$d/state_synced" 2>/dev/null)" = 0 ] && unsynced="$unsynced ${d##*/}"
+done
+echo "providers not synced:${unsynced:- none}"
+pl=/sys/bus/rpmsg/drivers/qcom_adsp_pwr_lmts
+bound=no
+for d in "$pl"/*PWR_LMTS*; do [ -e "$d" ] && bound=yes; done
+if [ $bound = yes ]; then
+	echo "ADSP standby notifier (qcom_adsp_pwr_lmts): bound"
+elif [ -d "$pl" ]; then
+	echo "ADSP standby notifier (qcom_adsp_pwr_lmts): loaded, but no ADSP channel bound"
+else
+	echo "ADSP standby notifier (qcom_adsp_pwr_lmts): not loaded (the ADSP then wakes about 100 times a second in suspend)"
+fi
+
+echo
+echo "== Linux side: system power domain idle states"
+for s in /proc/device-tree/cpus/domain-idle-states/*/; do
+	[ -e "$s/arm,psci-suspend-param" ] || continue
+	res=$(od -An -tu4 --endian=big "$s/min-residency-us" 2>/dev/null | tr -d ' ')
+	par=$(od -An -tx4 --endian=big "$s/arm,psci-suspend-param" 2>/dev/null | tr -d ' ')
+	echo "DT $(basename "$s"): psci-suspend-param 0x$par, min-residency ${res:-?} us"
+done
+# genpd names the states S0, S1, ... in DT order. Usage counts both suspends and
+# runtime entries; the S2idle column counts system-sleep entries in either mode.
+cat $D/pm_genpd/power-domain-system/idle_states 2>/dev/null
+echo "GDSCs on with no device attached (each one keeps CX up):"
+awk '/^[A-Za-z0-9_]/ && $1 != "domain" {
+		if (st == "on" && n == 0 && name ~ /gdsc/) { print "  " name; k++ }
+		name = $1; st = $2; n = 0; next }
+	/^    [^ ]/ { n++ }
+	END { if (st == "on" && n == 0 && name ~ /gdsc/) { print "  " name; k++ }
+		if (!k) print "  none" }' $D/pm_genpd/pm_genpd_summary 2>/dev/null
+
+echo
+echo "== SoC side: qcom_stats since boot (ticks are 19.2 MHz)"
+for s in aosd cxsd ddr apss; do
+	c=$(sed -n 's/^Count: //p' $D/qcom_stats/$s 2>/dev/null)
+	t=$(sed -n 's/^Accumulated Duration: //p' $D/qcom_stats/$s 2>/dev/null)
+	awk -v s=$s -v c="${c:-?}" -v t="${t:-0}" \
+		'BEGIN { printf "%-5s entered %6s times, %8.0f s total\n", s, c, t / 19200000 }'
+done
+echo "suspends this boot: $(cat /sys/power/suspend_stats/success) ok, $(cat /sys/power/suspend_stats/fail) failed"
+if irq=$(cat /sys/power/pm_wakeup_irq 2>/dev/null); then
+	# Drop the IRQ number and per-CPU counts; keep chip, hwirq, trigger and name.
+	echo "last wake IRQ: $irq ($(sed -n "s/^ *$irq: *\([0-9]* *\)*//p" /proc/interrupts))"
+fi
+
+echo
+echo "== per-suspend log ($log)"
+"$here/sleep-report" --log "$log" "$n"

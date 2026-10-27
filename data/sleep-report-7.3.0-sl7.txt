@@ -1,0 +1,14 @@
+start           length   mode   drain   %/h         aosd         cxsd          ddr         apss    adsp
+10-26 01:13         0m s2idle     0mW     ?     0x    0%     0x    0%     0x    0%     0x    0%     130
+10-26 01:15         4m s2idle     0mW     ?     0x    0%     0x    0%     0x    0%     0x    0%      98
+10-26 01:22       312m   deep   263mW  0.50    63x  100%    63x  100%    63x  100%     1x  100%     364
+10-26 06:34       114m   deep   276mW  0.52    23x  100%    23x  100%    23x  100%     1x  100%     116
+10-26 08:49       310m   deep   350mW  0.66    62x  100%    62x  100%    62x  100%     1x  100%     141
+10-26 14:00       310m   deep   241mW  0.47    62x  100%    62x  100%    62x  100%     1x  100%     144
+10-26 19:11         7m   deep     0mW  0.00     2x   98%     2x   98%     2x   98%     1x   98%      81
+10-26 19:33       162m   deep   191mW  0.37    33x  100%    33x  100%    33x  100%     1x  100%     115
+10-27 00:01         0m   deep     0mW  0.00     0x    0%     0x    0%     0x    0%     1x   58%       0
+
+Per state: times entered, and the share of the suspend spent in it.
+Negative drain means it was charging. Battery readings update slowly:
+trust drain only for suspends of 30 min or more.

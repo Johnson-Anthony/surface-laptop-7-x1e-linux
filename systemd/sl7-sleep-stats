@@ -1,0 +1,45 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# systemd-sleep hook: log battery energy and the Qualcomm SoC sleep counters before
+# and after every suspend, so drain and deep-sleep residency can be read back later
+# with tools/sleep/sleep-report.
+#
+# Install: sudo install -m 755 systemd/sl7-sleep-stats /usr/lib/systemd/system-sleep/
+# Remove:  sudo rm /usr/lib/systemd/system-sleep/sl7-sleep-stats
+#
+# Log format, one line per event (SL7_SLEEP_LOG, default /var/log/sl7-sleep.log):
+#   <epoch> <pre|post> <action> bat1=<uWh> battmgr=<uWh> full=<uWh>
+#     aosd=<count>/<ticks> cxsd=... ddr=... apss=... adsp=... cdsp=...
+#     mode=<s2idle|deep> kernel=<release>
+# Ticks are the 19.2 MHz always-on timer. An empty value means the file was missing.
+# Lines written before mode= and kernel= were added lack those two fields.
+
+LOG=${SL7_SLEEP_LOG:-/var/log/sl7-sleep.log}
+STATS=/sys/kernel/debug/qcom_stats
+PS=/sys/class/power_supply
+
+case "$1" in
+pre|post) ;;
+*) exit 0 ;;
+esac
+
+[ -d "$STATS" ] || modprobe qcom_stats 2>/dev/null
+
+line="$(date +%s) $1 $2"
+# BAT1 is the Surface Aggregator (SAM) battery, which some kernels register and
+# others (7.3.0-sl7) don't; qcom-battmgr-bat is the ADSP battery manager's view.
+line="$line bat1=$(cat $PS/BAT1/energy_now 2>/dev/null)"
+line="$line battmgr=$(cat $PS/qcom-battmgr-bat/energy_now 2>/dev/null)"
+line="$line full=$(cat $PS/BAT1/energy_full 2>/dev/null ||
+	cat $PS/qcom-battmgr-bat/energy_full 2>/dev/null)"
+for s in aosd cxsd ddr apss adsp cdsp; do
+	c=$(sed -n 's/^Count: //p' "$STATS/$s" 2>/dev/null)
+	d=$(sed -n 's/^Accumulated Duration: //p' "$STATS/$s" 2>/dev/null)
+	line="$line $s=${c:-?}/${d:-?}"
+done
+line="$line mode=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/power/mem_sleep 2>/dev/null)"
+line="$line kernel=$(uname -r)"
+echo "$line" >> "$LOG"
+exit 0
