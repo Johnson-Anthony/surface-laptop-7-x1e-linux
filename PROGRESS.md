@@ -10,7 +10,7 @@
 
 ## In progress
 
-- Nothing yet.
+- Task 1 (battery-life work) on `claude/bold-pasteur-c5ca7c`.
 
 ## Next
 
