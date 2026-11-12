@@ -29,3 +29,6 @@ __pycache__/
 *.buildinfo
 # Local test output
 test-logs/
+# Claude Code task worktrees and local settings
+.claude/worktrees/
+.claude/settings.local.json
