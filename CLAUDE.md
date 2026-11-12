@@ -12,7 +12,7 @@ There is no build or test suite; the author runs the hardware tests. These are t
 - Licenses: `reuse lint`
 - Shell: `grep -rlE '^#!.*\b(ba|da)?sh\b' tools systemd config .githooks | xargs -r shellcheck`
 - Python: `grep -rlE '^#!.*python' tools systemd config | xargs -r -n1 python3 -m py_compile`
-- Kernel patch style: `GIT_DIR=/nonexistent perl ~/sl7-kernel/linux-7.3.0/scripts/checkpatch.pl --no-tree --strict --ignore MISSING_SIGN_OFF patches/kernel-7.3/*.patch patches/kernel-7.3/build/*.patch`
+- Kernel patch style: `GIT_DIR=/nonexistent perl ~/sl7-kernel/linux-7.3.0/scripts/checkpatch.pl --no-tree --strict --ignore MISSING_SIGN_OFF,UNKNOWN_COMMIT_ID patches/kernel-7.3/*.patch patches/kernel-7.3/build/*.patch`
 
 # Rules
 
