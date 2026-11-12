@@ -18,6 +18,7 @@ State on the tested machine (13.8", X1P-64-100, kernel `7.3.0-sl7`) as of Octobe
 |---|---|---|
 | Sleep | `s2idle` stays shallow: Linux runs at EL1 under Qualcomm's Gunyah hypervisor, and s2idle never reaches SoC deep sleep there | Use `mem_sleep_default=deep`, which reaches full deep sleep (~270 mW). See [deep-sleep.md](deep-sleep.md) |
 | Boot | The global clock controller never reaches `sync_state` on its own: it waits for the GPU's GMU (`3d6a000.gmu`), which has no driver bound, so three power domains stay on | `fw_devlink.sync_state=timeout` releases them about 23 s after boot |
+| CPU | Only cluster 0 (CPUs 0-3) has cpufreq: clusters 1 and 2 run at a fixed level, with no energy model, and nothing is logged (found 2026-11-03) | Both untested: kernel patch 0006, or on battery park those cores with `sl7-power-mode`. See [power.md](power.md) |
 | Battery | The 7.0-era battery `BAT1` (Surface Aggregator) doesn't exist on 7.3 | Read `qcom-battmgr-bat` instead, e.g. in status bars |
 | Kernel | ItsLucas's prebuilt kernel image refuses to install on SKU 2036 (the 13.8") | Build from the kit instead; see [kernel-7.3.md](kernel-7.3.md) |
 | Face unlock | Howdy's `abort_if_lid_closed` does nothing on a device-tree boot and logs a harmless glob error on each attempt | Ignore, or turn the option off |

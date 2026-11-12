@@ -1,0 +1,70 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# sl7-power-mode hook for niri: run the internal panel at the refresh rate
+# nearest 60 Hz on battery and at its highest rate on the charger, keeping its
+# resolution. On the 13.8" panel that is 2304x1536 at 60 or 120 Hz.
+#
+# Install it as /etc/sl7-power-mode.d/niri-refresh-rate (mode 755), and have niri
+# run `sl7-power-mode` at login so a new session starts at the right rate
+# (docs/power.md). As root, from the service, it sets every running niri
+# session, as the session's owner. As a user it sets its own (NIRI_SOCKET).
+#
+# Usage: niri-refresh-rate battery|ac|status
+# SL7_PANEL names the output (default: the first eDP-* output).
+
+self=$(readlink -f "$0")
+
+# "<output> <current mode> <wanted mode>" for $1 (battery or ac), e.g.
+# eDP-1 2304x1536@120.000 2304x1536@60.000. Nothing if the panel is off.
+plan() {
+	niri msg outputs 2>/dev/null | awk -v want="$1" -v only="${SL7_PANEL:-}" '
+		/^Output / {
+			if (f) done = 1
+			o = $NF; gsub(/[()]/, "", o)
+			f = !done && (only != "" ? o == only : o ~ /^eDP-/)
+			if (f) out = o
+			m = 0
+			next
+		}
+		!f { next }
+		/Current mode:/ { res = $3; cur = $3 "@" $5; next }
+		/Available modes:/ { m = 1; next }
+		m && $1 ~ /^[0-9]+x[0-9]+@[0-9.]+$/ {
+			split($1, a, "@")
+			if (a[1] != res) next
+			d = a[2] - 60; if (d < 0) d = -d
+			s = want == "ac" ? a[2] + 0 : -d
+			if (best == "" || s > bs) { best = $1; bs = s }
+			next
+		}
+		{ m = 0 }
+		END { if (cur != "" && best != "") print out, cur, best }'
+}
+
+# In one session (NIRI_SOCKET set); skips the modeset when the mode is right.
+session() {
+	want=$1; [ "$want" = status ] && want=ac
+	read -r out cur best <<EOF
+$(plan "$want")
+EOF
+	[ -n "$best" ] || return 0
+	if [ "$1" = status ]; then echo "niri $out: $cur"
+	elif [ "$cur" != "$best" ]; then niri msg output "$out" mode "$best"
+	fi
+}
+
+case $1 in
+battery|ac|status) ;;
+*) exit 0 ;;
+esac
+
+if [ "$(id -u)" -ne 0 ]; then
+	session "$1"
+	exit
+fi
+for s in /run/user/*/niri.*.sock; do
+	[ -S "$s" ] || continue
+	runuser -u "$(stat -c %U "$s")" -- env NIRI_SOCKET="$s" "$self" "$1"
+done

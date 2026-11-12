@@ -2,8 +2,8 @@
 
 A 7.3 kernel for the Surface Laptop 7, built from Ubuntu's 7.3.0-9.9 source, the
 [ItsLucas Surface Laptop 7 kit](https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel)
-and seven patches of our own. It has been the default kernel on the tested machine since
-2026-10-26. The tested machine is a 13.8" Surface Laptop 7 (SKU 2036) with a Snapdragon X Plus
+and eight patches of our own. It has been the default kernel on the tested machine since
+2026-10-26, built with seven of them: the eighth, an `arm_scmi` cpufreq fix, is untested. The tested machine is a 13.8" Surface Laptop 7 (SKU 2036) with a Snapdragon X Plus
 X1P-64-100, which is the X1E80100 ("Hamoa") die with 10 of its 12 cores enabled. It boots the
 `romulus15` (15") device tree; [hardware.md](hardware.md) explains why.
 
@@ -44,7 +44,8 @@ stays shallow, as on 7.0. See [deep-sleep.md](deep-sleep.md).
    dock fixes, and a QCE driver that binds without registering algorithms. Provenance of each
    patch: the kit's [PROVENANCE.md](https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel/blob/2ce3083fa76855225465f809760dc7185c74a80c/PROVENANCE.md).
 3. Our patches: three spi-hid recovery fixes, `domain_ss3` at 10 s, spi-hid power-up beside
-   resume, the release name and module signing
+   resume, cpufreq for CPU clusters 1 and 2 (`arm_scmi`, untested and not in the installed
+   build yet), the release name and module signing
    ([details](../patches/kernel-7.3/README.md)).
 
 ### Kit patches on this machine
@@ -233,6 +234,10 @@ harmless to leave; remove them if no kernel uses them.
 - **Two CPUs fail to start.** `psci: failed to boot CPU7 (-22)` and the same for CPU11. The
   device tree describes the 12 cores of the X1E80100 die and this X1P-64-100 has 10 enabled.
   10 CPUs come up; harmless.
+- **Only CPU cluster 0 has cpufreq.** `/sys/devices/system/cpu/cpufreq/` has only `policy0`
+  (CPUs 0-3); clusters 1 and 2 run at a fixed level with no energy model, and nothing is
+  logged. Patch 0006 should fix it but is untested; until then
+  [`sl7-power-mode`](power.md) parks those cores on battery.
 - **GPU firmware errors before the root file system is mounted.** Three
   `Direct firmware load for qcom/gen70500_sqe.fw failed with error -2` lines, because the GPU
   firmware is not in the initramfs. The GPU starts once the root file system is up
