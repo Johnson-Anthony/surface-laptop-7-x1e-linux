@@ -1,16 +1,16 @@
 # Known issues
 
-State on the tested machine (13.8", X1P-64-100, kernel `7.3.0-sl7`) as of October 2026.
+State on the tested machine (13.8", X1P-64-100, kernel `7.3.0-sl7` build `+sl7.3`), checked
+2026-11-12.
 "Open" means the cause isn't known yet.
 
 ## Open
 
 | Area | Issue | Impact | Notes |
 |---|---|---|---|
-| IR camera | Stream start often stalls on 7.3: in one session, 11 of 43 capture starts delivered every frame; the rest stopped after 0-14 frames with nothing in the kernel log | Face unlock still approves in 1-2 s most of the time, but Howdy's reader retries only once, so some attempts probably fall back to the password | [ir-camera.md](ir-camera.md) |
-| Touchscreen | Header errors ("bad sync"), `Body read failed: -110` and a 2 s GET_FEATURE timeout at boot or around lid close and suspend; it recovers | Brief loss of touch | [`tools/debug/touch-lid-test`](../tools/debug/touch-lid-test) is written to catch it but hasn't been run yet |
-| Touchpad | The cold-boot fix (ItsLucas patch 0020, plus SPI HID fixes) isn't proven on 7.3 yet. The bug hit about 1 boot in 3 on 7.0; the first boots on 7.3 were all fine | Dead touchpad after some cold boots, if not fixed | Cold-boot several times, including with the lid closed right after shutdown. See [touchpad.md](touchpad.md) |
-| Speakers | The kernel caps `PA Volume` at 6, but the UCM speaker sequence writes 12. If UCM stops at the rejected write, the right amplifier's settings are skipped | Possibly a quiet or silent right speaker | Not yet checked by ear; see [audio.md](audio.md) |
+| IR camera | Stream start often stalls on 7.3: in one session, 11 of 43 capture starts delivered every frame; the rest stopped after 0-14 frames with nothing in the kernel log | Face unlock still approves in 1-2 s most of the time, but Howdy's reader retries only once. On 7.3, 15 of 62 attempts in the journal timed out and fell back to the password; how many of those were stalls rather than no face in view isn't known | [ir-camera.md](ir-camera.md) |
+| Touchscreen | Header errors ("bad sync"), `Body read failed: -110` and a 2 s GET_FEATURE timeout at boot or around lid close and suspend; it recovers. The touchpad hit the same timeout twice on 7.3, re-enumerating after a resume | Brief loss of touch | [`tools/debug/touch-lid-test`](../tools/debug/touch-lid-test) is written to catch it but hasn't been run yet |
+| Touchpad | The cold-boot fix (ItsLucas patch 0020, plus SPI HID fixes) isn't proven on 7.3 yet. The bug hit about 1 boot in 3 on 7.0; all 9 boots on 7.3 so far were fine, 6 of them from power-off | Dead touchpad after some cold boots, if not fixed | Two more good cold boots, or the lid-closed repro. See [touchpad.md](touchpad.md#testing-cold-boots) |
 
 ## Known, with a workaround
 

@@ -7,8 +7,8 @@ WirePlumber rule. With them, the speakers, headphones, headset mic and internal 
 Status: set up 2026-09-11 on the 7.0 kernel (Debian 13 userspace, alsa-ucm-conf 1.2.14,
 WirePlumber 0.5.8). On 7.3.0-sl7 (checked 2026-10-27), both DSPs start from the initramfs,
 the card `X1E80100Romulus` registers, WirePlumber uses the HiFi profile with Headphones and
-Speaker sinks, and the codec is in `CLS_AB_LOHIFI` mode. The speakers on 7.3 have an open
-question (see [Speakers](#speakers)).
+Speaker sinks, and the codec is in `CLS_AB_LOHIFI` mode. The speakers haven't been listened
+to on 7.3 yet (see [Speakers](#speakers)).
 
 | Piece | Installed at | Needed because |
 |---|---|---|
@@ -158,12 +158,15 @@ controls directly. There is no speaker protection on Linux for these amplifiers.
 - The Ubuntu 7.3.0-9.9 source this repo's kernel is built from caps them in
   `sound/soc/qcom/x1e80100.c` "until we have active speaker protection": `PA Volume` at 6
   (0 dB) and the WSA digital volume at -3 dB. Mainline 7.0-rc4 has no such cap.
-- Open question on 7.3: alsa-ucm-conf's speaker sequence (1.2.14 and current upstream) writes
-  `PA Volume` 12, which is above that cap, and the kernel rejects values above the cap with
-  `EINVAL`. If UCM stops the sequence there, the right amplifier's settings that follow would
-  not be applied. This has not been checked. Test both channels at low volume
-  (`speaker-test -c 2 -t wav -D default`), and look for `PA Volume` errors in
-  `journalctl --user -b -u wireplumber`.
+- alsa-ucm-conf's speaker sequence (1.2.14 and current upstream) writes `PA Volume` 12, above
+  that cap. This doesn't stop the sequence, so the right amplifier's settings that follow it
+  are applied (checked 2026-11-12): alsa-lib parses a `cset` integer against the control's
+  reported range, which the cap lowers to 0-6, so UCM writes 6 and the kernel never sees 12.
+  On the tested machine every `SpkrRight` switch the sequence sets is on, including
+  `PBR Switch`, which no other UCM sequence sets, and no journal has a `PA Volume` or
+  `cset` error from it.
+- Still to do on 7.3: a listening test of both channels at low volume
+  (`speaker-test -c 2 -t wav -D default`). The checks above are mixer state, not sound.
 
 To keep the speakers off entirely, a WirePlumber rule that matches
 `node.name = "alsa_output.platform-sound.HiFi__Speaker__sink"` and sets `node.disabled = true`

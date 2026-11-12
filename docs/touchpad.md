@@ -8,17 +8,26 @@ The main cause is in the embedded controller (EC). The EC keeps the touchpad off
 host enables Surface Aggregator posture (POS) events, and mainline Linux never does that on
 this model. Three bugs in the SPI HID driver made the failure silent and recovery harder.
 
-Status, 2026-10-27:
+Status, 2026-11-12:
 
 - Kernels with ItsLucas patch 0020, including the 7.3.0-sl7 kernel this repo builds,
   enable POS events themselves.
 - On kernels without it, [`sl7-pos-events`](../tools/touchpad/sl7-pos-events) sends the same
   request from userspace at every boot.
-- **Not proven yet.** Since the boot-time enable went in, the machine has booted 5 times
-  (2 on 7.0 with `sl7-pos-events`, 3 on 7.3 with 0020). The touchpad worked every time.
-  At the old rate of about 1 failure in 3 boots, 5 good boots in a row would happen by
-  chance about 13% of the time ((2/3)^5). The [test plan](#testing-cold-boots) below needs
-  far fewer boots if it uses the lid-closed repro.
+- **Not proven yet.** On 7.3 (2026-10-25 to 2026-11-12) the machine booted 9 times: 3 after a
+  reboot, 5 after a clean power-off, and 1 after a session that ended without a clean
+  shutdown. The touchpad worked every time: in 8 boots `sl7-touchpad-diag` logged its IRQ
+  count rising in the first 90 s, and in the ninth the compositor logged touchpad tap and hold
+  events later on. No device reset was logged, and `sl7-touchpad-kick` never ran. Twice, the
+  re-enumeration after a resume hit one SPI timeout and a 2 s GET_FEATURE timeout, like the
+  touchscreen's ([known issues](known-issues.md)); the pad worked afterwards. At the old rate
+  of about 1 failure in 3 boots, 6 good cold boots in a row would happen by chance about 9% of
+  the time ((2/3)^6). The [test plan](#testing-cold-boots) below asks for 8, or far fewer with
+  the lid-closed repro.
+- On this machine every one of those boots enabled POS events twice, from 0020 and from an
+  older copy of `sl7-pos-events` that doesn't skip 7.3 (see
+  [When the touchpad is dead](#when-the-touchpad-is-dead)), so they test the boot-time enable,
+  not 0020 on its own.
 
 ## The hardware
 
