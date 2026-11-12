@@ -1,5 +1,7 @@
 # README refresh (backlog task 3)
 
+Status: done, merged 2026-11-12 (`3aa7072`).
+
 Bring the README up to date with the battery-life work, check its existing claims against this
 machine, add a CI badge, and prepare GitHub topics. Report to the lead; it updates PROGRESS.md
 and the backlog.
