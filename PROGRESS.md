@@ -20,6 +20,9 @@
   `WSA WSA_RX0/RX1 Digital Volume` to 81 itself instead of including `wsa-macro/init.conf`,
   plus `tools/audio/ucm-boot-test` (`check` read-only, `run` for the author). Nothing audible
   changed on this machine (saved state hid it); fresh installs were affected.
+- 2026-11-12: pushed and made public, with the author's OK; GitHub topics set (linux,
+  linux-kernel, arm64, snapdragon, snapdragon-x, x1e80100, surface-laptop-7, linux-surface,
+  device-tree, face-unlock). Description unchanged.
 
 ## In progress
 
@@ -30,12 +33,9 @@
 ## Next
 
 1. Author: test-boot `+sl7.4` once, run the checks, then install it or roll back.
-2. With the author's OK: set the GitHub topics and description (proposed in task 3's report;
-   see the backlog).
-3. Author: run `tools/audio/ucm-boot-test run` after reinstalling the card entry (steps in
-   `docs/audio.md`, "Boot sequence").
-4. With the author's OK: make the repo public.
-5. With the author's OK: send patches upstream (`arm_scmi`, spi-hid) and report the same UCM
+2. Optional, author: `tools/audio/ucm-boot-test run` after reinstalling the card entry (steps
+   in `docs/audio.md`, "Boot sequence"). Only fresh installs were affected.
+3. With the author's OK: send patches upstream (`arm_scmi`, spi-hid) and report the same UCM
    boot stop to alsa-ucm-conf, then the pending forks,
    issues and PRs (ItsLucas, Howdy, panel-edp).
 
