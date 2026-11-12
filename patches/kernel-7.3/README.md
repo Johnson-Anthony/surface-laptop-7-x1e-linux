@@ -1,13 +1,13 @@
 # Kernel 7.3 patches
 
-Seven patches on top of Ubuntu's 7.3.0-9.9 kernel source and the
+Eight patches on top of Ubuntu's 7.3.0-9.9 kernel source and the
 [ItsLucas Surface Laptop 7 kit](https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel).
 [BASE.md](BASE.md) gives the exact base and the full build steps;
 [docs/kernel-7.3.md](../../docs/kernel-7.3.md) covers the kernel as a whole.
 
 | Directory | Patches | What for |
 |---|---|---|
-| `.` | 0001-0005 ([series](series)) | Four changes to the kit's spi-hid driver, one to the device tree |
+| `.` | 0001-0006 ([series](series)) | Four changes to the kit's spi-hid driver, one to the device tree, one to the SCMI perf driver (0006, untested) |
 | `build/` | 0001-0002 ([series](build/series)) | Packaging: the release name and module signing. Only needed when you build from Ubuntu's `linux-source` |
 
 Apply both sets on the base tree with `git am`:
@@ -17,8 +17,8 @@ git am /path/to/repo/patches/kernel-7.3/*.patch
 git am /path/to/repo/patches/kernel-7.3/build/*.patch
 ```
 
-The two sets touch different files, so either order works. Both orders were checked: each
-produces exactly the source tree of the kernel tested here.
+The two sets touch different files, so either order works. Both orders were checked and give
+the same tree. Without 0006, that is exactly the source tree of the kernel tested here.
 
 ## The patches
 
@@ -29,6 +29,7 @@ produces exactly the source tree of the kernel tested here.
 | 0003 `HID: spi-hid: end the IRQ loop after the error handler gives up` | same | When the error handler gives up it powers the device off but leaves the IRQ armed. An unpowered device holding the level-triggered line could keep the threaded IRQ firing until the next suspend. These are now counted as errors, so the existing storm mask stops the loop. |
 | 0004 `arm64: dts: qcom: x1e80100-romulus: keep runtime cpuidle out of SS3` | `arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi` | Raises `domain_ss3` min-residency to 10 s. Suspend still uses the system idle state; runtime cpuidle never picks it. Other X1E laptops hung when it was entered at runtime. |
 | 0005 `HID: spi-hid: power up beside resume, not inside it` | `drivers/hid/spi-hid/spi-hid-core.{c,h}` | The touchpad powered up inside its PM resume callback, which sleeps about 2.3 s (supply delay, reset pulse, 2 s firmware start), so every system resume waited for it. Both pads now power up on `system_unbound_wq`. Enumeration still waits for thaw. Sets `MODULE_VERSION` to `sl7.20261026.1`. |
+| 0006 `firmware: arm_scmi: perf: no turbo OPPs without a sustained frequency` (**untested**) | `drivers/firmware/arm_scmi/perf.c` | Only CPU cluster 0 gets a cpufreq policy: the firmware reports no sustained frequency for clusters 1 and 2, so every one of their OPPs is flagged turbo and cpufreq finds no usable frequency. With no sustained frequency, no OPP is flagged turbo any more. See [below](#0006-and-the-missing-cpufreq-policies). |
 | build/0001 `Makefile: drop -rc6 so the release is 7.3.0-sl7` | `Makefile` | Ubuntu 7.3.0-9.9 is 7.3-rc6 but versioned 7.3.0. The kit's CI also builds with an empty `EXTRAVERSION`. |
 | build/0002 `kbuild: sign modules without Ubuntu's debian/scripts/sign-module gate` | `scripts/Makefile.modinst` | Ubuntu signs a module only when `debian/scripts/sign-module` exists. `linux-source` does not ship `debian/`, so `bindeb-pkg` printed `SIGN` for every module and signed none, and the first module load tainted the kernel (`E`). This restores the upstream rule. |
 
@@ -38,7 +39,7 @@ so they carry no `Fixes:` tags: there is no upstream commit to point at.
 
 ## What was tested
 
-All seven are in the kernel this machine runs daily (`7.3.0-9.9+sl7.3`, a Surface Laptop 7
+All but 0006 are in the kernel this machine runs daily (`7.3.0-9.9+sl7.3`, a Surface Laptop 7
 13.8", X1E80100, booting the romulus15 device tree). Built natively with GCC 14.2.
 
 | Patch | Tested | Not tested |
@@ -46,8 +47,38 @@ All seven are in the kernel this machine runs daily (`7.3.0-9.9+sl7.3`, a Surfac
 | 0001-0003 | The touchpad and touchscreen enumerate and work on every boot since 2026-10-26, and across deep suspend and resume. | The recovery paths themselves. No device-initiated reset, power cycle or storm mask shows up in the logs yet (`device_initiated_reset_count` 0). |
 | 0004 | Deep suspend reaches CX collapse, AOSS sleep and DDR self-refresh (263-276 mW over 2-5 h tests). At runtime the system idle state is never entered: in debugfs, `power-domain-system` usage stays 0 until the first suspend and then equals its suspend count. | Whether the hang seen on other X1E laptops would happen on this one without it. |
 | 0005 | One deep suspend and resume on this build: `PM: suspend exit` came 2.0 s before the touchpad's power-on message. On the previous build it came 0.7 s after it. Both pads came back. | Many cycles; lid close with the touchscreen glitching (see the known issues in [docs/kernel-7.3.md](../../docs/kernel-7.3.md)). |
+| 0006 | Nothing yet: it is in no built kernel. It applies cleanly and passes checkpatch. | Everything. The next build (`+sl7.4`) is the first with it. |
 | build/0001 | `uname -r` is `7.3.0-sl7`. | |
 | build/0002 | Every module in the package is signed with the build's key (`modinfo -F signer`: "Build time autogenerated kernel key"); the kernel no longer taints `E`. | Secure Boot or `module.sig_enforce=1`. |
+
+## 0006 and the missing cpufreq policies
+
+On `+sl7.3` only `policy0` (CPUs 0-3) exists under `/sys/devices/system/cpu/cpufreq/`,
+although the device tree gives all three clusters SCMI perf domains. The kernel logs nothing
+about it. Clusters 1 and 2 run with no cpufreq, no energy model and no DVFS, at whatever
+level the boot firmware left them. [docs/power.md](../../docs/power.md) has the measurements
+and the `sl7-power-mode` workaround.
+
+The diagnosis behind it, from the 2026-11-03 debugging: the CPUCP firmware reports
+`sustained_freq_khz` 0 for NCC1 and NCC2 (NCC0 reports 3417600 kHz), so
+`scmi_dvfs_device_opps_add()` flags all 13 OPPs of those domains turbo. cpufreq then sees
+only boost frequencies, `cpufreq_frequency_table_cpuinfo()` returns -EINVAL because the new
+policy has boost off, and `cpufreq_online()` drops the policy with only a `pr_debug`. A
+failed policy also removes its OPPs, so this can't be read back on `+sl7.3`: `debugfs/opp/`
+lists only cpu0-3.
+
+To test it on a kernel with 0006:
+
+- `ls /sys/devices/system/cpu/cpufreq/` lists `policy0`, `policy4` and `policy8`;
+- `scaling_available_frequencies` of the new policies list real frequencies, and
+  `scaling_cur_freq` follows the load under schedutil;
+- `sl7-power-mode status` reports no fixed-clock CPUs, so it parks nothing;
+- nothing new in `dmesg` from `scmi`, `cpufreq` or the energy model.
+
+Before sending it upstream: test it, rebase on mainline, and add a `Fixes:` tag for the
+commit that introduced the turbo flag (not looked up yet). One question for review: on a
+part whose top OPPs are real boost frequencies, a domain that reports no sustained frequency
+now lists them as normal frequencies.
 
 ## Signed-off-by and Assisted-by
 
@@ -72,8 +103,9 @@ to and adjust the tag.
 
 None of these patches has been submitted anywhere yet. 0001-0003 and 0005 change the kit's
 spi-hid driver, which is not upstream, so they would go to the kit first. 0004 changes an
-upstream file and would go to linux-arm-msm after a rebase on mainline. The build/ patches are
-for this packaging route only.
+upstream file and would go to linux-arm-msm after a rebase on mainline. 0006 changes an
+upstream file too and would go to the SCMI maintainers (the arm-scmi and linux-arm-kernel
+lists), once it has been tested. The build/ patches are for this packaging route only.
 
 ## checkpatch
 
@@ -89,5 +121,6 @@ Each patch is under the license of the file it changes:
 | Patch | License |
 |---|---|
 | 0001, 0002, 0003, 0005 (`drivers/hid/spi-hid/`) | GPL-2.0-only |
+| 0006 (`drivers/firmware/arm_scmi/perf.c`) | GPL-2.0-only |
 | 0004 (`x1e80100-microsoft-romulus.dtsi`) | BSD-3-Clause |
 | build/0001 (`Makefile`), build/0002 (`scripts/Makefile.modinst`) | GPL-2.0-only |

@@ -12,15 +12,16 @@ The kernel is three layers, one git commit per change:
    `patches/series` (0001-0005, 0007-0022, 0026, 0027) and then `patches/series-if-needed`
    (0023-0025), each as one commit, with the kit CI's rules (`patch --fuzz=0`; an optional
    patch is skipped only if it is already fully in the tree). All 26 applied; none was
-   skipped. There is no 0006: the kit retired it (a QRTR revert that Ubuntu 7.3.0-6.6 made
+   skipped. The kit has no 0006: it retired it (a QRTR revert that Ubuntu 7.3.0-6.6 made
    unnecessary).
-3. This directory: `*.patch` (0001-0005), then `build/*.patch` (0001-0002).
+3. This directory: `*.patch` (0001-0006), then `build/*.patch` (0001-0002).
 
-Tested build: `7.3.0-9.9+sl7.3`, compiled natively on the laptop (arm64) with
-`gcc (Debian 14.2.0-19) 14.2.0` and `GNU ld (GNU Binutils for Debian) 2.44`, from
-`/proc/version` and `include/generated/compile.h`. Ubuntu builds its own 7.3.0-9 kernels
-with GCC 15.3.0 (`Ubuntu 15.3.0-4ubuntu1`, from `linux-buildinfo`); that compiler was not
-used here.
+Tested build: `7.3.0-9.9+sl7.3`, which has every patch here except 0006 (the `arm_scmi`
+perf fix from 2026-11-03, not built or run yet). It was compiled natively on the laptop
+(arm64) with `gcc (Debian 14.2.0-19) 14.2.0` and `GNU ld (GNU Binutils for Debian) 2.44`,
+from `/proc/version` and `include/generated/compile.h`. Ubuntu builds its own 7.3.0-9
+kernels with GCC 15.3.0 (`Ubuntu 15.3.0-4ubuntu1`, from `linux-buildinfo`); that compiler
+was not used here.
 
 ## Checkpoints
 
@@ -31,16 +32,23 @@ contents and modes, not on who made the commits, so yours should match exactly.
 |---|---|
 | importing `linux-source-7.3.0` 7.3.0-9.9 | `fc1233c83759335a592a7e152cb89686d64f58f9` |
 | `tools/kernel/apply-series` with the kit at `2ce3083` | `c581ba6c4a255278afdf5e06e6702c5608c9cfdc` |
-| `git am` of `*.patch` and `build/*.patch` | `a7533b071c4d3a3758011b524939561bd6ffa35e` |
+| `git am` of `*.patch` and `build/*.patch` | `5f201035b57e83361672efb77f5c8fd4711fbf1d` |
 
-All three were reproduced from scratch with the steps below on 2026-10-27.
+All three steps were reproduced from scratch with the steps below on 2026-10-27, when the
+series ended at 0005 and the last hash was `a7533b071c4d3a3758011b524939561bd6ffa35e`, the
+source of the tested `+sl7.3` kernel. When 0006 was added on 2026-11-12, the last hash was
+recomputed from the `c581ba6c` tree in a scratch clone with `git apply --cached`, which
+changes the files the way `git am` does but makes no commits. Applying 0001-0005 and
+`build/` that way gave `a7533b07` again. The full series gives `5f201035` in either order,
+and the two trees differ only in `drivers/firmware/arm_scmi/perf.c`.
 
 The tested kernel was built from a tree with five more files: `.orig` backups that GNU
 patch left when two kit patches applied at an offset (`drivers/hid/Kconfig.orig`,
 `drivers/hid/Makefile.orig`, `drivers/hid/hid-core.c.orig`, `include/linux/hid.h.orig`,
 `drivers/net/wireless/ath/ath12k/core.c.orig`). Nothing builds them, so the kernel is the
 same. The published `apply-series` passes `--no-backup-if-mismatch`, so they are gone, and
-the hashes above are for the tree without them.
+the hashes above are for the tree without them. On 2026-11-12, the build tree's last kit
+commit with those five files removed gave `c581ba6c` again.
 
 ## Steps
 
@@ -84,7 +92,7 @@ git patch`. A native build on the laptop takes about 1-2 hours with `-j10`.
    ```sh
    git am /path/to/repo/patches/kernel-7.3/*.patch
    git am /path/to/repo/patches/kernel-7.3/build/*.patch
-   git rev-parse HEAD^{tree}       # a7533b07...
+   git rev-parse HEAD^{tree}       # 5f201035...
    ```
 
 4. Write the config. By default this copies

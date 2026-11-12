@@ -3,3 +3,4 @@
 0003-HID-spi-hid-end-the-IRQ-loop-after-the-error-handler.patch
 0004-arm64-dts-qcom-x1e80100-romulus-keep-runtime-cpuidle.patch
 0005-HID-spi-hid-power-up-beside-resume-not-inside-it.patch
+0006-firmware-arm_scmi-perf-no-turbo-OPPs-without-a-susta.patch

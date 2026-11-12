@@ -17,7 +17,7 @@ SPDX-License-Identifier = "CC-BY-4.0"
 
 # Kernel patches take the license of the files they change.
 [[annotations]]
-path = ["patches/kernel-7.3/0001-*.patch", "patches/kernel-7.3/0002-*.patch", "patches/kernel-7.3/0003-*.patch", "patches/kernel-7.3/0005-*.patch", "patches/kernel-7.3/build/*.patch"]
+path = ["patches/kernel-7.3/0001-*.patch", "patches/kernel-7.3/0002-*.patch", "patches/kernel-7.3/0003-*.patch", "patches/kernel-7.3/0005-*.patch", "patches/kernel-7.3/0006-*.patch", "patches/kernel-7.3/build/*.patch"]
 SPDX-FileCopyrightText = "2026 Anthony Johnson"
 SPDX-License-Identifier = "GPL-2.0-only"
 

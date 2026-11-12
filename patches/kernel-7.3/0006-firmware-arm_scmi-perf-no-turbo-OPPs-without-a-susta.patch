@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anthony Johnson <105193579+Johnson-Anthony@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 04:30:00 +0000
+Subject: [PATCH 6/6] firmware: arm_scmi: perf: no turbo OPPs without a
+ sustained frequency
+
+scmi_dvfs_device_opps_add() flags every OPP above the domain's sustained
+frequency as turbo. On the Surface Laptop 7 (X1E80100, SCMI perf v4.0,
+level indexing) the CPUCP firmware reports sustained_freq_khz = 0 and
+sustained_perf_level = 0 for NCC1 and NCC2. NCC0 reports 3417600 kHz,
+level 12. So all 13 OPPs of domains 1 and 2 become turbo, and
+dev_pm_opp_init_cpufreq_table() marks every entry CPUFREQ_BOOST_FREQ.
+
+scmi_cpufreq_init() then succeeds for CPU4/CPU8. But
+cpufreq_table_validate_and_sort() -> cpufreq_frequency_table_cpuinfo()
+skips every boost entry, because the new policy's boost_enabled is
+still false at that point even when global boost is on. It finds no
+frequency, returns -EINVAL, and cpufreq_online() drops the policy with
+only pr_debug output. Clusters 1 and 2 never get a policy or an energy
+model, and they stay at whatever level the boot firmware left them.
+
+A zero sustained frequency gives no turbo threshold, so mark no OPPs
+turbo in that case. The mult_factor code already treats zero as "not
+provided".
+
+Assisted-by: LLM
+---
+ drivers/firmware/arm_scmi/perf.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/firmware/arm_scmi/perf.c b/drivers/firmware/arm_scmi/perf.c
+index 4583d02be..5c23a5b79 100644
+--- a/drivers/firmware/arm_scmi/perf.c
++++ b/drivers/firmware/arm_scmi/perf.c
+@@ -879,8 +879,14 @@ static int scmi_dvfs_device_opps_add(const struct scmi_protocol_handle *ph,
+ 		else
+ 			freq = dom->opp[idx].indicative_freq * dom->mult_factor;
+ 
+-		/* All OPPs above the sustained frequency are treated as turbo */
+-		data.turbo = freq > dom->sustained_freq_khz * 1000UL;
++		/*
++		 * All OPPs above the sustained frequency are treated as turbo.
++		 * A domain that reports no sustained frequency has none: marking
++		 * every OPP turbo leaves cpufreq no usable frequency with boost
++		 * off, so the policy is never created.
++		 */
++		data.turbo = dom->sustained_freq_khz &&
++			     freq > dom->sustained_freq_khz * 1000UL;
+ 
+ 		data.level = dom->opp[idx].perf;
+ 		data.freq = freq;
