@@ -7,8 +7,10 @@ in about 1 s. Every prompt falls back to the password if no face matches.
 
 Tested on a Surface Laptop 7 13.8" (model 2036) with the 7.0.0-rc4 and 7.3.0-sl7 kernels, on
 a Debian-based system (Parrot OS 7). It was set up on 2026-10-25 on 7.0, where the timings
-below were measured. On 7.3 the journal shows Howdy approving logins 1 to 2 s after each
-attempt started, in daily use. LightDM was deliberately left alone, and sudo wasn't set up.
+below were measured. On 7.3, in daily use from 2026-10-25 to 2026-11-12, the journal has 46
+approvals (27 swaylock, 19 polkit), with a median of 1.0 s from the attempt starting and 42
+within 2 s. 15 more attempts timed out and 1 couldn't open the camera; those fell back to the
+password. LightDM was deliberately left alone, and sudo wasn't set up.
 
 Howdy compares face encodings. It has no liveness check beyond what an IR image gives, and
 [its own README](https://github.com/boltgolt/howdy#a-note-on-security) says it is not as
