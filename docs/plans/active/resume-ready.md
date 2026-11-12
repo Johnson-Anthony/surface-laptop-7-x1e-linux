@@ -8,7 +8,7 @@ at least one patch upstream.
 | # | Task | Depends on | Status |
 |---|---|---|---|
 | 1 | Battery-life work into the repo: `sl7-power-mode`, its docs, and the `arm_scmi` patch in the 7.3 series | | done, merged 2026-11-12 (`f756b21`) |
-| 2 | Build `+sl7.4` with the `arm_scmi` patch; the author installs and tests it; record the results | 1 | running (`claude/serene-carson-8b0e7d`): tree ready, `Fixes:` tag added, build waiting for free RAM |
+| 2 | Build `+sl7.4` with the `arm_scmi` patch; the author installs and tests it; record the results | 1 | built 2026-11-12 (`Fixes:` tag and build notes merged in `285891c`); waiting for the author's test boot (`~/sl7-kernel/sl7.4-test/TEST-sl7.4.md`) |
 | 3 | README refresh for the new work; GitHub description, topics and CI badge prepared | 1 | done, merged 2026-11-12 (`3aa7072`); topics and description proposed, waiting for the author's OK |
 | 4 | Make the repo public | 1-3, author's OK | waiting |
 | 5 | Upstream: `arm_scmi`, spi-hid fixes; forks, issues and PRs | 2, author's OK | waiting |

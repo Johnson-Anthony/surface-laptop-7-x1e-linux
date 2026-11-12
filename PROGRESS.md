@@ -19,12 +19,13 @@
 
 ## In progress
 
-- Task 2: `+sl7.4` kernel build on `claude/serene-carson-8b0e7d`.
+- Task 2: `+sl7.4` is built (only `perf.o` and `version.o` changed; modules, DTBs and CRCs are
+  identical to `+sl7.3`). Waiting for the author's one-time test boot; steps in
+  `~/sl7-kernel/sl7.4-test/TEST-sl7.4.md`. Results go on `claude/serene-carson-8b0e7d`.
 
 ## Next
 
-1. Build a `+sl7.4` kernel with patch 0006 and the published config unchanged, for the author
-   to install and test (checks in `patches/kernel-7.3/README.md` and `docs/power.md`).
+1. Author: test-boot `+sl7.4` once, run the checks, then install it or roll back.
 2. With the author's OK: set the GitHub topics and description (proposed in task 3's report;
    see the backlog).
 3. Fix or document the UCM boot-sequence stop at `WSA_RX0 Digital Volume` (backlog task 6).
@@ -36,7 +37,6 @@
 
 - `sl7-power-mode` was never installed on this machine, although `~/sl7/power/README.md` says
   so: niri's `spawn-at-startup` line for it fails at every login (`NotFound`).
-- Patch 0006 needs a `Fixes:` tag for the commit that added turbo marking before it goes upstream.
 - The `arm_scmi` fix isn't in the installed kernel (`+sl7.3`): only `policy0` exists, so
   clusters 1 and 2 have no cpufreq.
 - Touchpad cold-boot fix not proven on 7.3: no dead pad in 9 boots (6 cold), but the test plan
