@@ -17,9 +17,10 @@ usual way, which makes `+sl7.4` the default.
 **Why.**
 
 - Patch 0006 changes only built-in code, so the whole fix is in the image.
-- `+sl7.3`'s modules load into the new image: the build kept the same config and signing key,
-  and `Module.symvers` (the symbol CRCs) and the module vermagic are unchanged. Checked after
-  the build before relying on it.
+- `+sl7.3`'s modules load into the new image. Checked after the build: `Module.symvers` (the
+  exported symbols and their CRCs) is identical, the signing key and the module vermagic are
+  the same, and of the 9954 files in the image package only `vmlinuz`, `System.map`, `config`
+  and the changelog differ. Every module and DTB is byte-identical to `+sl7.3`'s.
 - A failed test costs a reboot: the next boot is the unchanged `+sl7.3`.
 - Renaming the release instead (for example `7.3.0-sl7.4`) would have given it its own entries
   and modules, but it would change the release name every doc and GRUB entry uses, and

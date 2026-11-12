@@ -87,7 +87,12 @@ The open problems are listed in [known-issues.md](known-issues.md).
 
 [`config/kernel/config-7.3.0-sl7`](../config/kernel/config-7.3.0-sl7) is the config of the
 tested kernel, unchanged. `tools/kernel/make-config TREE` copies it into a patched tree and runs
-`make olddefconfig`; on the build machine that changes nothing.
+`make olddefconfig`. That changes only lines that kconfig fills in from the toolchain. On the
+build machine it changed nothing on 2026-10-27, when it had rustc 1.85.1. With rustc 1.99.1
+(2026-11-12) it rewrites the three `CONFIG_RUSTC_*VERSION` lines and adds five
+`CONFIG_RUSTC_HAS_*` lines. Rust stays off, so nothing builds differently: the `+sl7.4` rebuild
+with those lines recompiled only `perf.c`, the file patch 0006 changes, and `init/version.c`,
+which every build does.
 
 How it was made: the 7.0 kernel's config, plus the 33 Qualcomm, Surface, audio and camera
 options that Ubuntu's 7.3 config enables and the 7.0 config lacked, plus the options in
@@ -96,8 +101,8 @@ workarounds, not hardware needs:
 
 - `SYSTEM_TRUSTED_KEYS` and `SYSTEM_REVOCATION_KEYS` are empty, because Ubuntu's config points
   them at `debian/canonical-*.pem` files that `linux-source` does not ship.
-- Rust, BTF and debug info are off. The build host (Debian 13) has rustc 1.85, too old for this
-  kernel's Rust support, and no `pahole`, so BTF cannot be generated. No debug info also keeps
+- Rust, BTF and debug info are off. When the config was made, the build host (Debian 13) had
+  rustc 1.85, too old for this kernel's Rust support, and no `pahole`, so BTF cannot be generated. No debug info also keeps
   the build smaller and faster. If your toolchain has a newer rustc and `pahole`, you can drop
   that block of the fragment.
 

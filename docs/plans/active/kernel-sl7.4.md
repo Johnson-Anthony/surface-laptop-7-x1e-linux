@@ -1,6 +1,6 @@
 # Kernel +sl7.4: the arm_scmi fix in a built kernel
 
-Status: in progress.
+Status: built 2026-11-12 (steps 1-5 done); waiting for the author's test results (step 6).
 
 Task 2 of [resume-ready.md](resume-ready.md): build `7.3.0-sl7` as `7.3.0-9.9+sl7.4`, which is
 the installed `+sl7.3` plus patch 0006, for the author to install and test. Then record the
@@ -32,9 +32,12 @@ results.
    `.config` still equals the published config, before compiling.
 3. **Build** in the same tree, incrementally
    ([why](../../decisions/2026-11-12-sl74-incremental-build.md)). Gate: no other
-   `cargo`/`rustc`/`tauri` build and at least 8 GB available, polled in the background. Then
-   `nice make -j6 LOCALVERSION= KDEB_PKGVERSION=7.3.0-9.9+sl7.4 bindeb-pkg` in a
-   memory-capped scope, in the background, logged to `~/sl7-kernel/logs/build4.log`.
+   `cargo`/`rustc`/`tauri` build (two samples a minute apart) and at least 4 GB available,
+   polled in the background. Then
+   `nice make -j4 LOCALVERSION= KDEB_PKGVERSION=7.3.0-9.9+sl7.4 bindeb-pkg` in a 3 GB
+   memory-capped scope, in the background, logged to `~/sl7-kernel/logs/build4.log`. If it
+   hits the cap, stop and report; don't raise it. (The lead lowered the gate from 8 GB and
+   `-j6` for this small rebuild: apps held the memory, not builds.)
 4. **Check the packages.** Names and sizes; the image's version string; `perf.o` rebuilt;
    `Module.symvers` equal to `+sl7.3`'s; modules signed by the same key with the same
    vermagic. Those last two show that `+sl7.3`'s modules, initramfs and out-of-tree modules
@@ -46,6 +49,18 @@ results.
    once it passes; rolling back to `+sl7.3`. Report to the lead.
 6. **Results.** When the lead sends them: record them in `patches/kernel-7.3/README.md` and
    `docs/power.md` (and the matching lines of `docs/kernel-7.3.md`), commit, report again.
+
+## Build notes
+
+- 3 minutes at `-j4`, scope peak 2.58 GB, no OOM kill. Recompiled: `perf.o` and `version.o`.
+- `syncconfig` rewrote the `CONFIG_RUSTC_*` lines in `.config`: the host's rustc is now 1.99.1,
+  not 1.85.1. Rust is off and no object was rebuilt for it; only the packaged
+  config files show it (`/boot/config-7.3.0-sl7`, and `auto.conf`, `autoconf.h` and
+  `rustc_cfg` in the headers). The published config stays as it is (the tested one).
+- The disassembly of `scmi_dvfs_device_opps_add()` in `perf.o` shows the new check: turbo is
+  0 when `sustained_freq_khz` is 0, before the `* 1000` comparison.
+- Test instructions with the machine's UUIDs: `~/sl7-kernel/sl7.4-test/TEST-sl7.4.md`, with
+  the GRUB entry, the extracted image and a `+sl7.3` baseline next to it.
 
 Out of scope: README.md, PROGRESS.md, resume-ready.md; installing, GRUB, reboots; deleting the
 `+sl7.1`-`+sl7.3` packages (`+sl7.3` is the rollback).

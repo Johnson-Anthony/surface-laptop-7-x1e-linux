@@ -98,7 +98,9 @@ git patch`. A native build on the laptop takes about 1-2 hours with `-j10`.
 4. Write the config. By default this copies
    [`config/kernel/config-7.3.0-sl7`](../../config/kernel/config-7.3.0-sl7), the config of
    the tested kernel, and runs `make olddefconfig`; it prints any value your toolchain
-   changed. In the from-scratch check on the build machine, nothing changed.
+   changed. In the from-scratch check on the build machine (2026-10-27), nothing changed;
+   with a newer rustc only the `CONFIG_RUSTC_*` lines do (see "Config" in
+   [docs/kernel-7.3.md](../../docs/kernel-7.3.md)).
 
    ```sh
    /path/to/repo/tools/kernel/make-config .
