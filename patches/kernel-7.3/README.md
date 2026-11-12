@@ -75,8 +75,14 @@ To test it on a kernel with 0006:
 - `sl7-power-mode status` reports no fixed-clock CPUs, so it parks nothing;
 - nothing new in `dmesg` from `scmi`, `cpufreq` or the energy model.
 
-Before sending it upstream: test it, rebase on mainline, and add a `Fixes:` tag for the
-commit that introduced the turbo flag (not looked up yet). One question for review: on a
+It carries `Fixes: a897575e79d7` ("firmware: arm_scmi: Add support for marking certain
+frequencies as turbo", first in v6.9), the commit that added the turbo flag and with it
+`data.turbo = freq > dom->sustained_freq_khz * 1000`. The only later change to that line,
+`ad28fc31dd70` ("firmware: arm_scmi: Fix up turbo frequencies selection"), fixed an overflow
+in the multiplication and has the same `Fixes:` tag. Mainline still has the line as it is in
+7.3 (checked 2026-11-12), so the change carries over to a rebase as it is.
+
+Before sending it upstream: test it and rebase on mainline. One question for review: on a
 part whose top OPPs are real boost frequencies, a domain that reports no sustained frequency
 now lists them as normal frequencies.
 
@@ -113,6 +119,23 @@ lists), once it has been tested. The build/ patches are for this packaging route
 `Missing Signed-off-by: line(s)`, which is expected (see above): 0 warnings, 0 checks.
 checkpatch learned the `Assisted-by:` tag in 7.1; 7.0 and older call it a non-standard
 signature.
+
+CI runs checkpatch with no git history (`GIT_DIR=/nonexistent`, so that it reads the files
+as patches). Then it can't look up the commit in a `Fixes:` tag and reports
+`Unknown commit id` for every one, so CI ignores that type (`UNKNOWN_COMMIT_ID`).
+Check a new `Fixes:` tag by hand instead: with `GIT_DIR` set to a repository that has the
+commit, checkpatch also checks that the subject in the tag matches it. A bare repository
+with just that commit is enough (it needs the full id):
+
+```sh
+git init -q --bare /tmp/fixes.git
+git -C /tmp/fixes.git fetch -q --depth=1 --filter=tree:0 \
+    https://github.com/torvalds/linux a897575e79d7a2ec79abe942b50ecd1d1cdd821b
+GIT_DIR=/tmp/fixes.git perl scripts/checkpatch.pl --no-tree --strict \
+    --ignore MISSING_SIGN_OFF /path/to/repo/patches/kernel-7.3/*.patch
+```
+
+For the whole series, 0006 included, that reports 0 warnings and 0 checks (2026-11-12).
 
 ## Licenses
 

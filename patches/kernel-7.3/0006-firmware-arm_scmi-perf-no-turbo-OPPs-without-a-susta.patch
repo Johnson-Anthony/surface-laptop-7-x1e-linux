@@ -23,6 +23,7 @@ A zero sustained frequency gives no turbo threshold, so mark no OPPs
 turbo in that case. The mult_factor code already treats zero as "not
 provided".
 
+Fixes: a897575e79d7 ("firmware: arm_scmi: Add support for marking certain frequencies as turbo")
 Assisted-by: LLM
 ---
  drivers/firmware/arm_scmi/perf.c | 10 ++++++++--
