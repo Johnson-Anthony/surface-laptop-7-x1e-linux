@@ -1,7 +1,9 @@
 # UCM boot sequence stops at `WSA_RX0 Digital Volume`
 
+Status: done, merged 2026-11-12 (`5915034`); the author's `ucm-boot-test run` is pending.
+
 Status: steps 1-5 done 2026-11-12; waiting for the author's `ucm-boot-test run` (task 6 of
-[resume-ready.md](resume-ready.md)).
+[resume-ready.md](../active/resume-ready.md)).
 
 ## Findings before starting
 

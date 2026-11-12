@@ -16,6 +16,10 @@
   eight patches, and every status row rechecked against the 7.3 journals (touchpad 9 boots,
   face unlock 46 approvals at a 1.0 s median, speaker amp settings applied). Rule for status
   rows: `docs/decisions/2026-11-12-readme-status-evidence.md`.
+- 2026-11-12: UCM boot-sequence fix merged (task 6): the card entry sets the prefixed
+  `WSA WSA_RX0/RX1 Digital Volume` to 81 itself instead of including `wsa-macro/init.conf`,
+  plus `tools/audio/ucm-boot-test` (`check` read-only, `run` for the author). Nothing audible
+  changed on this machine (saved state hid it); fresh installs were affected.
 
 ## In progress
 
@@ -28,9 +32,11 @@
 1. Author: test-boot `+sl7.4` once, run the checks, then install it or roll back.
 2. With the author's OK: set the GitHub topics and description (proposed in task 3's report;
    see the backlog).
-3. Fix or document the UCM boot-sequence stop at `WSA_RX0 Digital Volume` (backlog task 6).
+3. Author: run `tools/audio/ucm-boot-test run` after reinstalling the card entry (steps in
+   `docs/audio.md`, "Boot sequence").
 4. With the author's OK: make the repo public.
-5. With the author's OK: send patches upstream (`arm_scmi`, spi-hid), then the pending forks,
+5. With the author's OK: send patches upstream (`arm_scmi`, spi-hid) and report the same UCM
+   boot stop to alsa-ucm-conf, then the pending forks,
    issues and PRs (ItsLucas, Howdy, panel-edp).
 
 ## Broken / known issues
@@ -42,5 +48,6 @@
 - Touchpad cold-boot fix not proven on 7.3: no dead pad in 9 boots (6 cold), but the test plan
   asks for 8 good cold boots.
 - Speakers not yet listened to on 7.3 (`speaker-test -c 2 -t wav -D default`, low volume).
-- UCM boot sequence stops at `WSA_RX0 Digital Volume` when there's no saved ALSA state.
+- UCM boot-sequence fix is in the repo but untested on the hardware (`ucm-boot-test run`); the
+  installed card entry still has the old include. Same bug upstream, not reported yet.
 - IR camera stream start sometimes stalls.

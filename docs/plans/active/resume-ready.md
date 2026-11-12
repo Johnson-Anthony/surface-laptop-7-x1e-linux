@@ -11,8 +11,8 @@ at least one patch upstream.
 | 2 | Build `+sl7.4` with the `arm_scmi` patch; the author installs and tests it; record the results | 1 | built 2026-11-12 (`Fixes:` tag and build notes merged in `285891c`); waiting for the author's test boot (`~/sl7-kernel/sl7.4-test/TEST-sl7.4.md`) |
 | 3 | README refresh for the new work; GitHub description, topics and CI badge prepared | 1 | done, merged 2026-11-12 (`3aa7072`); topics and description proposed, waiting for the author's OK |
 | 4 | Make the repo public | 1-3, author's OK | waiting |
-| 5 | Upstream: `arm_scmi`, spi-hid fixes; forks, issues and PRs | 2, author's OK | waiting |
-| 6 | UCM boot sequence stops at `WSA_RX0 Digital Volume` (this card names it `WSA WSA_RX0 Digital Volume`), so RX1 and rx-macro init are skipped when there's no saved ALSA state: fix or document in `docs/audio.md` | | queued |
+| 5 | Upstream: `arm_scmi`, spi-hid fixes; an alsa-ucm-conf report (unprefixed `wsa-macro/init.conf` in the T14s, Surface Pro 11/12in and TUXEDO profiles: same boot stop); forks, issues and PRs | 2, author's OK | waiting |
+| 6 | UCM boot sequence stops at `WSA_RX0 Digital Volume` (this card names it `WSA WSA_RX0 Digital Volume`), so RX1 and rx-macro init are skipped when there's no saved ALSA state: fix or document in `docs/audio.md` | | done, merged 2026-11-12 (`5915034`); the author runs `tools/audio/ucm-boot-test run` |
 
 Tasks 2 and 3 can run in parallel once 1 is merged. Only one kernel build at a time.
 
