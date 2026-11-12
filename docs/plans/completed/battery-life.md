@@ -1,6 +1,8 @@
 # Battery-life work into the repo
 
-Task 1 of [resume-ready.md](resume-ready.md): `sl7-power-mode` from `~/sl7/power/` and the
+Status: done, merged 2026-11-12 (`f756b21`).
+
+Task 1 of [resume-ready.md](../active/resume-ready.md): `sl7-power-mode` from `~/sl7/power/` and the
 `arm_scmi` perf patch from `~/sl7-kernel/patches/local/0002-…`.
 
 ## Findings before starting
