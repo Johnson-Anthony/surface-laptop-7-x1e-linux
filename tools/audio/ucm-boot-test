@@ -1,0 +1,263 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Test the UCM boot sequence of the Surface Laptop 7's sound card: the mixer
+# settings alsactl applies at boot when there is no saved ALSA state, as on a
+# fresh install. alsa-lib stops the whole sequence at the first line that
+# fails, so one wrong control name skips everything after it.
+#
+#   ucm-boot-test check [FILE]
+#       Read-only. Lists the boot sequence of FILE and the files it includes,
+#       in the order alsa-lib runs it, and checks each control and value
+#       against the live card. FILE defaults to the installed card entry,
+#       /usr/share/alsa/ucm2/conf.d/x1e80100/<card long name>.conf.
+#
+#   ucm-boot-test run [FILE]
+#       Changes the mixer for a few seconds, then puts everything back. Run it
+#       as your user from the desktop session (it uses sudo for alsactl):
+#        1. saves the mixer and a copy of /var/lib/alsa;
+#        2. stops PipeWire and WirePlumber, so nothing plays or saves volumes;
+#        3. sets each control of the boot sequence to a low value (integers to
+#           their minimum; switches and enums to another value);
+#        4. runs alsactl's no-state path (alsactl -f <missing file> restore),
+#           which runs the boot sequence just as on a fresh install;
+#        5. passes if alsa-lib logged nothing and every control has the value
+#           the sequence sets;
+#        6. restores the mixer and /var/lib/alsa, checks both, and starts
+#           PipeWire and WirePlumber again (also on Ctrl-C or an error).
+#       Output and backups: ${XDG_STATE_HOME:-~/.local/state}/sl7/ucm-boot-<time>/
+#
+# Limits: If blocks are not evaluated (pass the file a DMI match selects
+# instead), and only top-level Include lines are followed.
+# See docs/audio.md, "Boot sequence".
+
+set -u
+CARD=${CARD:-X1E80100Romulus}
+UCM_ROOT=${UCM_ROOT:-/usr/share/alsa/ucm2}
+UNITS="pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
+
+die() { echo "ucm-boot-test: $*" >&2; exit 1; }
+
+[ -e "/proc/asound/$CARD" ] || die "no sound card '$CARD' (set CARD=<id> for another card)"
+longname=$(awk -v id="[$CARD" 'index($0, id) { getline; sub(/^ +/, ""); print; exit }' /proc/asound/cards)
+
+# Boot sequence of UCM file $1 in alsa-lib's order: the file's own
+# BootSequence, then each top-level Include in turn (included BootSequence
+# items are appended). One "<control id> TAB <value> TAB <file>" line per cset.
+boot_seq() {
+	local f=$1 inc
+	[ -r "$f" ] || { echo "ucm-boot-test: cannot read $f" >&2; return 1; }
+	awk -v F="$f" '
+		/^[ \t]*#/ { next }
+		/^[ \t]*BootSequence[ \t]*\[/ { inb = 1; next }
+		inb && /^[ \t]*\]/ { inb = 0; next }
+		inb && match($0, /cset "[^"]*"/) {
+			s = substr($0, RSTART + 6, RLENGTH - 7)
+			n = split(s, a, " ")
+			printf "%s\t%s\t%s\n", substr(s, 1, length(s) - length(a[n]) - 1), a[n], F
+		}' "$f"
+	awk '/^[ \t]*Include\.[^.]+\.File[ \t]/ && match($0, /"[^"]+"/) {
+		print substr($0, RSTART + 1, RLENGTH - 2) }' "$f" |
+		while read -r inc; do boot_seq "$UCM_ROOT$inc"; done
+}
+
+# Read control $1 of the live card into T (type), CNT, MIN, MAX, CUR (as
+# amixer prints the values) and ITEMS (enum item names, one per line).
+ctl_info() {
+	local out
+	out=$(amixer -c "$CARD" cget "$1" 2>/dev/null) || return 1
+	T=$(sed -n 's/^ *; type=\([A-Z0-9]*\),.*/\1/p' <<<"$out")
+	CNT=$(sed -n 's/^ *; type=[^,]*,access=[^,]*,values=\([0-9]*\).*/\1/p' <<<"$out")
+	MIN=$(sed -n 's/^ *; type=.*,min=\(-\{0,1\}[0-9]*\),.*/\1/p' <<<"$out")
+	MAX=$(sed -n 's/^ *; type=.*,max=\(-\{0,1\}[0-9]*\),.*/\1/p' <<<"$out")
+	CUR=$(sed -n 's/^ *: values=//p' <<<"$out")
+	ITEMS=$(sed -n "s/^ *; Item #[0-9]* '\(.*\)'\$/\1/p" <<<"$out")
+	[ -n "$T" ]
+}
+
+# Value $1 as amixer will print it after alsa-lib's cset (control read by
+# ctl_info): integers clamped to the range, enum names as indexes, switches
+# as on/off, one value for every channel unless $1 is a list.
+expect() {
+	local v=$1 out="" x i j parts
+	IFS=, read -r -a parts <<<"$v"
+	for ((i = 0; i < CNT; i++)); do
+		x=$v
+		[[ $v == *,* ]] && x=${parts[i]:-}
+		case $T in
+		INTEGER)
+			[[ $x =~ ^-?[0-9]+$ ]] || { echo "?"; return; }
+			((x < MIN)) && x=$MIN
+			((x > MAX)) && x=$MAX ;;
+		BOOLEAN)
+			case ${x,,} in on* | up* | yes* | [1-9]*) x=on ;; *) x=off ;; esac ;;
+		ENUMERATED)
+			j=$(grep -nxF -- "$x" <<<"$ITEMS" | cut -d: -f1)
+			[ -n "$j" ] && x=$((j - 1)) ;;
+		esac
+		out+=${out:+,}$x
+	done
+	echo "$out"
+}
+
+# A low or different value for the current control, to show the boot
+# sequence really set it. Prints nothing if there is none.
+sentinel() {
+	local e=$1 i name
+	case $T in
+	INTEGER) echo "$MIN" ;;
+	BOOLEAN) if [ "${e%%,*}" = on ]; then echo off; else echo on; fi ;;
+	ENUMERATED)
+		i=0
+		while IFS= read -r name; do
+			[ "$i" != "${e%%,*}" ] && [[ $name != *INVALID* ]] && { echo "$i"; return; }
+			i=$((i + 1))
+		done <<<"$ITEMS" ;;
+	esac
+}
+
+# List and check the boot sequence of $1; fills IDS and EXPS.
+# Returns 1 if a control is missing (alsa-lib would stop there).
+scan() {
+	local id v f e note stop=0
+	IDS=() EXPS=()
+	echo "Boot sequence of ${1#"$UCM_ROOT/"}, card $CARD, in run order:"
+	while IFS=$'\t' read -r id v f; do
+		if [ "$f" = "$1" ]; then f="this file"; else f=${f#"$UCM_ROOT"}; fi
+		if ((stop)); then
+			printf '  not run  %s %s  (%s)\n' "$id" "$v" "$f"
+			continue
+		fi
+		if ! ctl_info "$id"; then
+			printf '  MISSING  %s %s  (%s)\n' "$id" "$v" "$f"
+			stop=1
+			continue
+		fi
+		e=$(expect "$v")
+		note=""
+		[ "$T" = INTEGER ] && note=" range $MIN-$MAX"
+		[ "$T" = INTEGER ] && [ "$v" != "${e%%,*}" ] && note="$note; alsa-lib writes ${e%%,*}"
+		printf '  ok       %s %s  (%s; now %s%s)\n' "$id" "$v" "$f" "$CUR" "$note"
+		IDS+=("$id") EXPS+=("$e")
+	done < <(boot_seq "$1")
+	if ((stop)); then
+		echo "A control is missing: alsa-lib stops the boot sequence there and skips the lines after it."
+		return 1
+	fi
+	echo "All ${#IDS[@]} controls exist."
+}
+
+default_file() {
+	local f="$UCM_ROOT/conf.d/x1e80100/$longname.conf"
+	[ -e "$f" ] && { echo "$f"; return; }
+	die "no card entry at $f. Install it (docs/audio.md), or pass the file UCM uses, e.g. $UCM_ROOT/Qualcomm/x1e80100/LENOVO-T14s.conf (alsa-ucm-conf 1.2.15 and later match this laptop to it by DMI)"
+}
+
+restore() {
+	# Finish the restore even on a second Ctrl-C or a closed terminal.
+	trap '' INT TERM HUP PIPE
+	trap - EXIT
+	echo
+	echo "== restore"
+	# The logs are meant to be the user's files (SC2024).
+	# shellcheck disable=SC2024
+	sudo alsactl -f "$B/mixer-before.state" restore "$CARD" >"$B/restore.log" 2>&1
+	sudo alsactl -f "$B/mixer-after.state" store "$CARD"
+	# Last, after every alsactl call: the restore rewrites card*.conf.d.
+	sudo tar -C /var/lib -xpf "$B/var-lib-alsa.tar"
+	if cmp -s "$B/mixer-before.state" "$B/mixer-after.state"; then
+		echo "mixer: restored, identical to the backup"
+	else
+		echo "mixer: DIFFERS from the backup (diff below; jack and impedance controls are read-only and may change):"
+		diff "$B/mixer-before.state" "$B/mixer-after.state" | head -40
+	fi
+	# shellcheck disable=SC2024
+	if sudo tar -C /var/lib -df "$B/var-lib-alsa.tar" >"$B/tar-compare.txt" 2>&1 &&
+		sudo find /var/lib/alsa -printf '%P\n' | sort | cmp -s - "$B/files-before.txt"; then
+		echo "/var/lib/alsa: restored, identical to the backup"
+	else
+		echo "/var/lib/alsa: DIFFERS from the backup (see $B/tar-compare.txt; files before: files-before.txt)"
+	fi
+	if [ -n "$active" ]; then
+		# shellcheck disable=SC2086
+		systemctl --user start $active && echo "started again:$active"
+	fi
+	echo "Backups and logs: $B (root-owned files inside; remove with sudo rm -r)"
+}
+
+run() {
+	local file=$1 i u bad=0 s
+	[ "$(id -u)" -ne 0 ] || die "run as your user, not with sudo: it stops your PipeWire and calls sudo itself"
+	scan "$file" || echo "(expect a FAIL: this is the bug the test looks for)"
+	echo
+	B=${XDG_STATE_HOME:-$HOME/.local/state}/sl7/ucm-boot-$(date +%Y%m%d-%H%M%S)
+	mkdir -p "$B" || die "cannot create $B"
+	# Copy everything to report.txt; tee ignores Ctrl-C so the restore's
+	# output still gets through.
+	exec > >(trap '' INT TERM HUP; exec tee "$B/report.txt") 2>&1
+	sudo -v || die "sudo is needed for alsactl"
+	echo "== backup to $B"
+	sudo alsactl -f "$B/mixer-before.state" store "$CARD" || die "alsactl store failed; nothing was changed"
+	sudo tar -C /var/lib -cpf "$B/var-lib-alsa.tar" alsa || die "backup of /var/lib/alsa failed; nothing was changed"
+	sudo find /var/lib/alsa -printf '%P\n' | sort >"$B/files-before.txt"
+	active=""
+	for u in $UNITS; do
+		[ "$(systemctl --user is-active "$u" 2>/dev/null)" = active ] && active="$active $u"
+	done
+	trap restore EXIT
+	trap 'exit 130' INT TERM HUP
+	if [ -n "$active" ]; then
+		echo "stopping:$active"
+		# shellcheck disable=SC2086
+		systemctl --user stop $UNITS
+	fi
+
+	echo "== set the boot controls to low values"
+	for i in "${!IDS[@]}"; do
+		ctl_info "${IDS[i]}" || die "control vanished: ${IDS[i]}"
+		s=$(sentinel "${EXPS[i]}")
+		[ -n "$s" ] || continue
+		amixer -q -c "$CARD" cset "${IDS[i]}" "$s" || die "cannot set ${IDS[i]} to $s"
+		ctl_info "${IDS[i]}"
+		printf '  %s = %s\n' "${IDS[i]}" "$CUR"
+	done
+
+	echo "== run the boot sequence (alsactl restore, no state file)"
+	# shellcheck disable=SC2024
+	sudo alsactl -f "$B/no-state-file" restore "$CARD" >"$B/alsactl.log" 2>&1
+	sed 's/^/  | /' "$B/alsactl.log"
+	if grep -qE 'alsa-lib|generic method' "$B/alsactl.log"; then
+		echo "  FAIL: alsa-lib reported an error, or alsactl fell back to its generic init"
+		bad=1
+	else
+		echo "  ok: no alsa-lib errors, no generic-init fallback"
+	fi
+
+	echo "== check the values"
+	for i in "${!IDS[@]}"; do
+		ctl_info "${IDS[i]}" || CUR="(missing)"
+		if [ "$CUR" = "${EXPS[i]}" ]; then
+			printf '  ok    %s = %s\n' "${IDS[i]}" "$CUR"
+		else
+			printf '  FAIL  %s = %s, expected %s\n' "${IDS[i]}" "$CUR" "${EXPS[i]}"
+			bad=1
+		fi
+	done
+	echo
+	if ((bad)); then
+		echo "RESULT: FAIL"
+	else
+		echo "RESULT: PASS, the boot sequence ran to the end and set all ${#IDS[@]} controls"
+	fi
+	return "$bad"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+check | run)
+	if [ $# -gt 0 ]; then file=$1; else file=$(default_file) || exit 1; fi
+	if [ "$cmd" = check ]; then scan "$file"; else run "$file"; fi ;;
+*) sed -n '/^#   ucm-boot-test/,/^# See docs/p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

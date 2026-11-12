@@ -22,6 +22,7 @@ State on the tested machine (13.8", X1P-64-100, kernel `7.3.0-sl7` build `+sl7.3
 | Battery | The 7.0-era battery `BAT1` (Surface Aggregator) doesn't exist on 7.3 | Read `qcom-battmgr-bat` instead, e.g. in status bars |
 | Kernel | ItsLucas's prebuilt kernel image refuses to install on SKU 2036 (the 13.8") | Build from the kit instead; see [kernel-7.3.md](kernel-7.3.md) |
 | Face unlock | Howdy's `abort_if_lid_closed` does nothing on a device-tree boot and logs a harmless glob error on each attempt | Ignore, or turn the option off |
+| Audio | With no saved ALSA state (a fresh install), the UCM boot sequence stopped at `WSA_RX0 Digital Volume`, which this card names `WSA WSA_RX0 Digital Volume`, and skipped the lines after it. Nothing audible so far. Upstream alsa-ucm-conf has the same bug | The repo's card entry now sets the prefixed controls itself (2026-11-12; `ucm-boot-test run` hasn't been run on the hardware yet). Reinstall it; see [audio.md](audio.md#boot-sequence) |
 
 ## Harmless messages
 
