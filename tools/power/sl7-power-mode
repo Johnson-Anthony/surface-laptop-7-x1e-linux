@@ -1,0 +1,125 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Battery/charger power mode for the Surface Laptop 7 (docs/power.md).
+#   battery  park the online CPUs that have no cpufreq policy. On 7.3.0-sl7
+#            scmi-cpufreq registers only cluster 0, so clusters 1 and 2 run at
+#            a fixed level whatever the load; parked, they power off. This is a
+#            workaround: once the kernel gives them a policy, nothing is parked.
+#   ac       bring the parked CPUs back.
+# Then it runs every executable in /etc/sl7-power-mode.d/ (SL7_POWER_HOOKS)
+# with the mode as $1, e.g. tools/power/hooks/niri-refresh-rate. "Battery"
+# means a system battery reports Discharging, which also covers a charger too
+# weak to run the laptop.
+#
+# sl7-power-mode.service runs it as root (udev power_supply events, boot,
+# resume). Run as a user, e.g. from the compositor at login, it only runs the
+# hooks.
+#
+# Usage: [sudo] sl7-power-mode [apply|status|full|auto|--if-changed]
+#   apply         apply the mode for the current power state (default)
+#   status        show the mode and the parked CPUs; changes nothing
+#   full          all cores now, held on battery until `auto` or reboot
+#   auto          drop the hold and apply
+#   --if-changed  apply only if the power state changed since the last run (the service)
+
+PS=/sys/class/power_supply
+CPU=/sys/devices/system/cpu
+RUN=/run/sl7-power-mode
+HOOKS=${SL7_POWER_HOOKS:-/etc/sl7-power-mode.d}
+self=$(readlink -f "$0")
+root=no; [ "$(id -u)" -eq 0 ] && root=yes
+
+log() { logger -t sl7-power-mode "$*"; [ -t 1 ] && echo "$*"; }
+
+# The system batteries. HID devices (mice, pens) register batteries too, with
+# scope Device; those say nothing about the laptop.
+batteries() {
+	for b in "$PS"/*; do
+		[ "$(cat "$b/type" 2>/dev/null)" = Battery ] || continue
+		[ "$(cat "$b/scope" 2>/dev/null)" = Device ] && continue
+		echo "$b"
+	done
+}
+
+mode() {
+	[ -e $RUN/hold ] && { echo ac; return; }
+	for b in $(batteries); do
+		[ "$(cat "$b/status" 2>/dev/null)" = Discharging ] && { echo battery; return; }
+	done
+	echo ac
+}
+
+# "<status> <percent>%" for each system battery
+battery_status() {
+	for b in $(batteries); do
+		if [ -r "$b/capacity" ]; then p=$(cat "$b/capacity")
+		elif [ -r "$b/energy_full" ]; then p=$(( $(cat "$b/energy_now") * 100 / $(cat "$b/energy_full") ))
+		else p=$(( $(cat "$b/charge_now") * 100 / $(cat "$b/charge_full") )); fi
+		echo "${b##*/} $(cat "$b/status" 2>/dev/null) $p%"
+	done
+}
+
+# Online CPUs without a cpufreq policy, never cpu0. Prints nothing unless at
+# least two CPUs scale, so a broken cpufreq driver can't leave one core running.
+fixed_cpus() {
+	n=$(cat $CPU/cpufreq/policy*/related_cpus 2>/dev/null | wc -w)
+	[ "$n" -ge 2 ] || return 0
+	for d in "$CPU"/cpu[1-9]*; do
+		[ "$(cat "$d/online" 2>/dev/null)" = 1 ] && [ ! -e "$d/cpufreq" ] && echo "${d##*cpu}"
+	done
+}
+
+parked() { sort -nu $RUN/parked 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+
+park() {
+	for c in $(fixed_cpus); do
+		echo 0 > "$CPU/cpu$c/online" && echo "$c" >> $RUN/parked
+	done
+}
+
+unpark() {
+	for c in $(parked); do
+		echo 1 > "$CPU/cpu$c/online" || log "cpu$c failed to come back online"
+	done
+	rm -f $RUN/parked
+}
+
+# Each hook gets battery, ac or status. A failing hook is logged, not fatal.
+run_hooks() {
+	for h in "$HOOKS"/*; do
+		if [ -f "$h" ] && [ -x "$h" ]; then
+			"$h" "$1" || log "hook ${h##*/} $1 failed ($?)"
+		fi
+	done
+}
+
+apply() {
+	m=$(mode)
+	if [ $root = yes ]; then
+		mkdir -p $RUN
+		if [ "$m" = battery ]; then park; else unpark; fi
+		echo "$m" > $RUN/mode
+		log "$m: parked CPUs [$(parked)], online $(cat $CPU/online)"
+	fi
+	run_hooks "$m"
+}
+
+need_root() { [ $root = yes ] || { echo "run with sudo" >&2; exit 1; }; }
+
+case ${1:-apply} in
+apply) apply ;;
+--if-changed)
+	[ "$(mode)" = "$(cat $RUN/mode 2>/dev/null)" ] && exit 0
+	apply ;;
+full) need_root; mkdir -p $RUN; touch $RUN/hold; apply ;;
+auto) need_root; rm -f $RUN/hold; apply ;;
+status)
+	held=; [ -e $RUN/hold ] && held=" (held by full)"
+	echo "mode: $(mode)$held; $(battery_status | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+	echo "CPUs online: $(cat $CPU/online), parked by this tool: [$(parked)]," \
+		"fixed-clock and online: [$(fixed_cpus | sort -n | tr '\n' ' ' | sed 's/ $//')]"
+	run_hooks status ;;
+*) sed -n '/^# Usage/,/^$/p' "$self" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

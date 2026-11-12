@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Applies the battery/charger power mode (sl7-power-mode). Started by
+# config/udev/90-sl7-power-mode.rules on power_supply events (including
+# coldplug at boot), and here after every resume.
+[Unit]
+Description=Surface Laptop 7 battery/charger power mode (CPU parking and hooks)
+Documentation=https://github.com/Johnson-Anthony/surface-laptop-7-x1e-linux/blob/main/docs/power.md
+After=suspend.target
+
+[Service]
+Type=oneshot
+# Let a plug/unplug burst of events settle before reading the battery state.
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/local/sbin/sl7-power-mode --if-changed
+
+[Install]
+WantedBy=suspend.target

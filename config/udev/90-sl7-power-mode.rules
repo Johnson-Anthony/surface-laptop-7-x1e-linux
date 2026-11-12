@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 Anthony Johnson
+#
+# Re-check the power mode whenever a power supply changes (sl7-power-mode,
+# docs/power.md). Battery level updates land here too; the script exits early
+# when the mode is unchanged.
+SUBSYSTEM=="power_supply", ACTION=="add|change", RUN+="/usr/bin/systemctl --no-block start sl7-power-mode.service"
