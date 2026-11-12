@@ -15,7 +15,8 @@
 
 ## In progress
 
-- Nothing yet; tasks 2 and 3 are next.
+- Task 2: `+sl7.4` kernel build on `claude/serene-carson-8b0e7d`.
+- Task 3: README refresh on `claude/intelligent-curie-348165`.
 
 ## Next
 
