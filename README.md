@@ -19,7 +19,7 @@ variants are untested, and reports are welcome.
 | Wi-Fi | Works, with WCN7850 firmware `c7-00108` from linux-firmware 20261019 | [firmware.md](docs/firmware.md) |
 | Touchpad | Works: no dead touchpad in 9 boots on 7.3, 6 of them from power-off. Too few yet to prove the cold-boot fix | [touchpad.md](docs/touchpad.md) |
 | Touchscreen | Works, with brief error-and-recover episodes around suspend | [known-issues.md](docs/known-issues.md) |
-| Speakers, headphones | Headphones work. On 7.3 both speaker amplifiers get their settings; the speakers haven't been listened to yet | [audio.md](docs/audio.md) |
+| Speakers, headphones | Work on 7.3: both speaker amplifiers get their settings, and the author confirmed the speakers play (2026-11-13) | [audio.md](docs/audio.md) |
 | Front camera | Works (libcamera) | [kernel-7.3.md](docs/kernel-7.3.md) |
 | IR camera | Works with ST's driver, one patch and a device-tree overlay. Stream start sometimes stalls | [ir-camera.md](docs/ir-camera.md) |
 | Face unlock | Lock screen and polkit prompts (so Bitwarden): median 1.0 s over 46 approvals on 7.3 | [face-unlock.md](docs/face-unlock.md) |

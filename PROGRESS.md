@@ -23,6 +23,7 @@
 - 2026-11-12: pushed and made public, with the author's OK; GitHub topics set (linux,
   linux-kernel, arm64, snapdragon, snapdragon-x, x1e80100, surface-laptop-7, linux-surface,
   device-tree, face-unlock). Description unchanged.
+- 2026-11-13: the author confirmed the speakers play on 7.3; README and `docs/audio.md` say so.
 
 ## In progress
 
@@ -47,7 +48,6 @@
   clusters 1 and 2 have no cpufreq.
 - Touchpad cold-boot fix not proven on 7.3: no dead pad in 9 boots (6 cold), but the test plan
   asks for 8 good cold boots.
-- Speakers not yet listened to on 7.3 (`speaker-test -c 2 -t wav -D default`, low volume).
 - UCM boot-sequence fix is in the repo but untested on the hardware (`ucm-boot-test run`); the
   installed card entry still has the old include. Same bug upstream, not reported yet.
 - IR camera stream start sometimes stalls.

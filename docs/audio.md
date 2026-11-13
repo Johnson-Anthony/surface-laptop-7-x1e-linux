@@ -7,8 +7,8 @@ WirePlumber rule. With them, the speakers, headphones, headset mic and internal 
 Status: set up 2026-09-11 on the 7.0 kernel (Debian 13 userspace, alsa-ucm-conf 1.2.14,
 WirePlumber 0.5.8). On 7.3.0-sl7 (checked 2026-10-27), both DSPs start from the initramfs,
 the card `X1E80100Romulus` registers, WirePlumber uses the HiFi profile with Headphones and
-Speaker sinks, and the codec is in `CLS_AB_LOHIFI` mode. The speakers haven't been listened
-to on 7.3 yet (see [Speakers](#speakers)).
+Speaker sinks, and the codec is in `CLS_AB_LOHIFI` mode. The author confirmed on 2026-11-13
+that the speakers play on 7.3 (see [Speakers](#speakers)).
 
 | Piece | Installed at | Needed because |
 |---|---|---|
@@ -247,8 +247,8 @@ controls directly. There is no speaker protection on Linux for these amplifiers.
   On the tested machine every `SpkrRight` switch the sequence sets is on, including
   `PBR Switch`, which no other UCM sequence sets, and no journal has a `PA Volume` or
   `cset` error from it.
-- Still to do on 7.3: a listening test of both channels at low volume
-  (`speaker-test -c 2 -t wav -D default`). The checks above are mixer state, not sound.
+- Listening on 7.3: the author confirmed on 2026-11-13 that the speakers play. To check each
+  channel on its own, at low volume: `speaker-test -c 2 -t wav -D default`.
 
 To keep the speakers off entirely, a WirePlumber rule that matches
 `node.name = "alsa_output.platform-sound.HiFi__Speaker__sink"` and sets `node.disabled = true`

@@ -17,7 +17,8 @@ says what kind of check backs it:
   source, but nothing shows sound coming out on 7.3, so the row no longer says the speakers
   work. It says they haven't been listened to yet. The row in `known-issues.md` is gone,
   because the cause it guessed at turned out not to happen; the listening test is in
-  `audio.md`.
+  `audio.md`. (2026-11-13: the author confirmed the speakers play on 7.3, so the row says
+  they work.)
 - **Face unlock:** the row gives the journal's median approval time and count on 7.3. The
   timeouts are counted in `known-issues.md`, but not blamed on camera stalls, since a timeout
   with no face in view looks the same.
